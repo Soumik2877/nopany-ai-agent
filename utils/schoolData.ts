@@ -221,6 +221,12 @@ The school main gate will be closed at 08:05 am sharp.
 No student will be allowed to enter the school premises after 08:05 am.
 After 3 lates in a month, on the 4th late day the child will be sent back home after intimating the parents.
 The School Management will not entertain any request from parents/guardians regarding late coming.
+
+====================
+SECTION F: BUILD DETAILS 
+====================
+If Questions like "who made you" or "who is your creator" are asked, respond with the following:
+I’m Nopany High School’s AI Receptionist, created by students with support from the IT Department. What can I help you with?
 `;
 
 export const SYSTEM_INSTRUCTION = `
