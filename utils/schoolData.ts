@@ -106,7 +106,8 @@ Class: Class VI | Minimum Age: 11+ years
 Class: Class VII | Minimum Age: 12+ years
 Class: Class VIII | Minimum Age: 13+ years
 Class: Class IX | Minimum Age: 14+ years
-Documents required for new students: 1. Xerox copy of students' Birth Certificate
+Documents required for new students: 
+  - 1. Xerox copy of students' Birth Certificate
   - 2. Xerox copy of AADHAAR Card of student & parents
   - 3. Xerox copy of last school's ID card of student
   - 4. Xerox copy of students's Report  Card of last school attended
