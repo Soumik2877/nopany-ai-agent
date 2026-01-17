@@ -1,0 +1,7 @@
+{
+  "name": "Nopany High AI Receptionist",
+  "description": "A voice-enabled AI receptionist for Nopany High School, capable of answering queries about fees, admissions, and more in multiple languages.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
