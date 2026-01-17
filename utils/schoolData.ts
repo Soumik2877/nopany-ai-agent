@@ -65,6 +65,7 @@ SECTION B: Admissions & Fees:
 
 **Fees structure (2026-2027)**
 
+-Note all the fees are in INR(Rupees).
 -- Fee Structure --
 Type: Tuition Fees (Monthly)
   - Pre-Nursery to UKG: 2400
