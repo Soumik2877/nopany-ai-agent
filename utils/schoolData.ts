@@ -59,38 +59,49 @@ Holiday: Immersion | Date: 2027-02-12 (Friday)
 Holiday: Eid-ul-Fitr | Date: 2027-03-10 (Wednesday)
 Holiday: Dol and Holi | Date: 2027-03-22 (Monday)
 
-====================
+=================== 
 SECTION B: Admissions & Fees:
-====================
+=================== 
 
-**Fees structure (2026-2027)**
+Investment in Excellence: Fee Structure (2026-2027)
+Our fee structure is curated to provide premium academic delivery, state-of-the-art infrastructure, and holistic development. We ensure every rupee contributes directly to your child's future readiness.
 
--Note all the fees are in INR(Rupees).
--- Fee Structure --
-Type: Tuition Fees (Monthly)
-  - Pre-Nursery to UKG: 2400
-  - Class I & II: 2750
-  - Class III to VIII: 3150
-  - Class IX & X: 3415
-  - Class XI & XII: 3900
-Type: Term Fees (Quarterly-Apr, Jul, Oct & Jan)
-  - Pre-Nursery to UKG: 3315
-  - Class I & II: 3675
-  - Class III to VIII: 3850
-  - Class IX & X: 3885
-  - Class XI & XII: 4505
-Type: Session Charges (Beginning of the Session)
-  - Pre-Nursery to UKG: 9000
-  - Class I & II: 13125
-  - Class III to VIII: 15750
-  - Class IX & X: 18375
-  - Class XI & XII: 18375
-Type: Admission Fees (One Time up to Class X)
-  - Pre-Nursery to UKG: 18000
-  - Class I & II: 18000
-  - Class III to VIII: 18000
-  - Class IX & X: 18000
-  - Class XI & XII: 18000
+-Note: All fees are in INR (Rupees).
+
+-- Fee Structure -- 
+
+Type: Monthly Tuition Fees (Comprehensive Academic Guidance) Covers expert faculty, personalized mentorship, and daily classroom excellence.
+
+Pre-Nursery to UKG: 2400
+Class I & II: 2750
+Class III to VIII: 3150
+Class IX & X: 3415
+Class XI & XII: 3900
+
+Type: Quarterly Term Fees (Holistic Development & Infrastructure) Paid in Apr, Jul, Oct & Jan. Supports science labs, libraries, sports facilities, and co-curricular activities.
+
+Pre-Nursery to UKG: 3315
+Class I & II: 3675
+Class III to VIII: 3850
+Class IX & X: 3885
+Class XI & XII: 4505
+
+Type: Annual Session Charges (New Session Essentials) Paid at the beginning of the session. Covers digital learning tools, examination logistics, and annual academic resources.
+
+Pre-Nursery to UKG: 9000
+Class I & II: 13125
+Class III to VIII: 15750
+Class IX & X: 18375
+Class XI & XII: 18375
+
+Type: Admission Fees (One-Time Enrollment) A one-time investment for lifetime campus access and administrative setup.
+
+Pre-Nursery to UKG: 18000
+Class I & II: 18000
+Class III to VIII: 18000
+Class IX & X: 18000
+Class XI & XII: 18000
+
 
 -- Age Criteria --
 Class: Pre-Nursery | Minimum Age: 2+ years
@@ -231,7 +242,7 @@ I’m Nopany High School’s AI Receptionist, created by students with support f
 
 export const SYSTEM_INSTRUCTION = `
 **Role:**
-You are the helpful and polite AI Receptionist for Nopany High School. Your goal is to assist parents, students, and staff by answering their questions accurately via voice.
+You are the helpful and polite AI Receptionist for Nopany High School named Ruby. Your goal is to assist parents, students, and staff by answering their questions accurately via voice.
 
 **Knowledge Base:**
 ${SCHOOL_KNOWLEDGE_BASE}
@@ -246,7 +257,7 @@ ${SCHOOL_KNOWLEDGE_BASE}
 4. **Content:** Keep responses brief and to the point, as this is a voice conversation.
 
 **Specific Behavior:**
-- If asked about fees, specify the grade level.
+- If asked about fees, specify the grade level and say why the price is worth it from ${SCHOOL_KNOWLEDGE_BASE}.
 - If asked about admissions, mention the age criteria and required documents.
 - If asked about teachers, check the "Staff Directory" section carefully.
 `;
