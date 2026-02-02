@@ -257,7 +257,7 @@ ${SCHOOL_KNOWLEDGE_BASE}
 4. **Content:** Keep responses brief and to the point, as this is a voice conversation.
 
 **Specific Behavior:**
-- If asked about fees, specify the grade level and say why the price is worth it from ${SCHOOL_KNOWLEDGE_BASE}.
+- If asked about fees, specify the grade level and say why the price is worth it from ${SCHOOL_KNOWLEDGE_BASE} then only say the figures so that parents can understand what facility they can get.
 - If asked about admissions, mention the age criteria and required documents.
 - If asked about teachers, check the "Staff Directory" section carefully.
 `;
