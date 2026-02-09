@@ -1,0 +1,1055 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+components/
+  AudioVisualizer.tsx
+hooks/
+  useLiveAPI.ts
+utils/
+  audioUtils.ts
+  schoolData.ts
+.gitignore
+App.tsx
+index.html
+index.tsx
+metadata.json
+package.json
+README.md
+tsconfig.json
+vite.config.ts
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="components/AudioVisualizer.tsx">
+import React, { useEffect, useRef } from 'react';
+
+interface AudioVisualizerProps {
+  analyser: AnalyserNode | null;
+  isActive: boolean;
+  barColor?: string;
+}
+
+const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ analyser, isActive, barColor = '#4F46E5' }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const requestRef = useRef<number>();
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Set canvas size for high DPI
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    const bufferLength = analyser ? analyser.frequencyBinCount : 0;
+    const dataArray = analyser ? new Uint8Array(bufferLength) : new Uint8Array(0);
+
+    const draw = () => {
+      if (!isActive || !analyser) {
+        ctx.clearRect(0, 0, rect.width, rect.height);
+        // Draw a flat line or idle state
+        ctx.beginPath();
+        ctx.moveTo(0, rect.height / 2);
+        ctx.lineTo(rect.width, rect.height / 2);
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        return;
+      }
+
+      requestRef.current = requestAnimationFrame(draw);
+
+      analyser.getByteFrequencyData(dataArray);
+
+      ctx.clearRect(0, 0, rect.width, rect.height);
+
+      const barWidth = (rect.width / bufferLength) * 2.5;
+      let barHeight;
+      let x = 0;
+
+      for (let i = 0; i < bufferLength; i++) {
+        barHeight = (dataArray[i] / 255) * rect.height;
+
+        // Gradient color
+        const gradient = ctx.createLinearGradient(0, rect.height - barHeight, 0, rect.height);
+        gradient.addColorStop(0, barColor);
+        gradient.addColorStop(1, '#818CF8'); // Lighter shade
+
+        ctx.fillStyle = gradient;
+        
+        // Center the bars vertically
+        const y = (rect.height - barHeight) / 2;
+        
+        // Rounded bars
+        ctx.beginPath();
+        ctx.roundRect(x, y, barWidth, barHeight, 2);
+        ctx.fill();
+
+        x += barWidth + 1;
+      }
+    };
+
+    if (isActive) {
+      draw();
+    } else {
+        // Clear immediately if not active
+        ctx.clearRect(0, 0, rect.width, rect.height);
+        ctx.beginPath();
+        ctx.moveTo(0, rect.height / 2);
+        ctx.lineTo(rect.width, rect.height / 2);
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if (requestRef.current) {
+            cancelAnimationFrame(requestRef.current);
+        }
+    }
+
+    return () => {
+      if (requestRef.current) {
+        cancelAnimationFrame(requestRef.current);
+      }
+    };
+  }, [analyser, isActive, barColor]);
+
+  return <canvas ref={canvasRef} className="w-full h-full rounded-lg" style={{ width: '100%', height: '100%' }} />;
+};
+
+export default AudioVisualizer;
+</file>
+
+<file path="hooks/useLiveAPI.ts">
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
+import { SYSTEM_INSTRUCTION } from '../utils/schoolData';
+import { createPcmBlob, base64ToArrayBuffer, decodeAudioData } from '../utils/audioUtils';
+
+interface UseLiveAPIResult {
+  connect: () => Promise<void>;
+  disconnect: () => void;
+  isConnected: boolean;
+  isConnecting: boolean;
+  error: string | null;
+  analyser: AnalyserNode | null; // For visualization
+}
+
+export const useLiveAPI = (): UseLiveAPIResult => {
+  const [isConnected, setIsConnected] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
+
+  const inputAudioContextRef = useRef<AudioContext | null>(null);
+  const outputAudioContextRef = useRef<AudioContext | null>(null);
+  const sessionRef = useRef<any>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const nextStartTimeRef = useRef<number>(0);
+  const audioQueueRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+
+  const disconnect = useCallback(() => {
+    // 1. Close session
+    if (sessionRef.current) {
+       // There is no explicit .close() in the JS SDK generic session object usually exposed, 
+       // but typically we just stop sending data and let it timeout or if the SDK provides a close method.
+       // The example mentions onclose callback but not explicit close method on session object in the snippet.
+       // We can assume dropping the reference and stopping streams is enough or if the specific SDK version has .close()
+       // For safety, we just clean up local resources.
+       sessionRef.current = null;
+    }
+
+    // 2. Stop audio tracks
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+
+    // 3. Close audio contexts
+    if (inputAudioContextRef.current) {
+      inputAudioContextRef.current.close();
+      inputAudioContextRef.current = null;
+    }
+    if (outputAudioContextRef.current) {
+      outputAudioContextRef.current.close();
+      outputAudioContextRef.current = null;
+    }
+
+    // 4. Disconnect nodes
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+    if (sourceRef.current) {
+      sourceRef.current.disconnect();
+      sourceRef.current = null;
+    }
+
+    // 5. Clear audio queue
+    audioQueueRef.current.forEach(source => source.stop());
+    audioQueueRef.current.clear();
+
+    setIsConnected(false);
+    setIsConnecting(false);
+    setAnalyser(null);
+  }, []);
+
+  const connect = useCallback(async () => {
+    if (isConnecting || isConnected) return;
+    setIsConnecting(true);
+    setError(null);
+
+    try {
+      const apiKey = process.env.API_KEY;
+      if (!apiKey) {
+        throw new Error("API Key not found in environment variables");
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
+
+      // Setup Audio Contexts
+      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      
+      inputAudioContextRef.current = inputCtx;
+      outputAudioContextRef.current = outputCtx;
+
+      // Setup Visualizer Analyser
+      const newAnalyser = outputCtx.createAnalyser();
+      newAnalyser.fftSize = 256; // Smaller FFT size for smoother visuals
+      setAnalyser(newAnalyser);
+
+      // Get Microphone Stream
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+
+      // Connect to Gemini Live
+      const sessionPromise = ai.live.connect({
+        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+        config: {
+          responseModalities: [Modality.AUDIO],
+          systemInstruction: SYSTEM_INSTRUCTION,
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }, // Professional tone
+          },
+        },
+        callbacks: {
+          onopen: () => {
+            console.log("Gemini Live Session Opened");
+            setIsConnected(true);
+            setIsConnecting(false);
+
+            // Start processing microphone input
+            const source = inputCtx.createMediaStreamSource(stream);
+            sourceRef.current = source;
+            
+            // Use ScriptProcessor (as per guidelines example)
+            const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
+            processorRef.current = scriptProcessor;
+
+            scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
+              const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+              const pcmBlob = createPcmBlob(inputData);
+              
+              // Send to model
+              sessionPromise.then((session) => {
+                session.sendRealtimeInput({ media: pcmBlob });
+              }).catch(err => console.error("Session send error", err));
+            };
+
+            source.connect(scriptProcessor);
+            scriptProcessor.connect(inputCtx.destination); // Mute locally, but needed for processing
+          },
+          onmessage: async (message: LiveServerMessage) => {
+            // Handle Audio Output
+            const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            if (base64Audio) {
+              const ctx = outputAudioContextRef.current;
+              if (!ctx) return;
+
+              // Ensure timing
+              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+
+              try {
+                const arrayBuffer = base64ToArrayBuffer(base64Audio);
+                const audioBuffer = await decodeAudioData(arrayBuffer, ctx, 24000, 1);
+                
+                const source = ctx.createBufferSource();
+                source.buffer = audioBuffer;
+                
+                // Connect to analyser for visualization, then to destination
+                source.connect(newAnalyser);
+                newAnalyser.connect(ctx.destination);
+
+                source.addEventListener('ended', () => {
+                   audioQueueRef.current.delete(source);
+                });
+
+                source.start(nextStartTimeRef.current);
+                nextStartTimeRef.current += audioBuffer.duration;
+                audioQueueRef.current.add(source);
+
+              } catch (decodeErr) {
+                console.error("Audio decode error:", decodeErr);
+              }
+            }
+
+            // Handle Interruption
+            if (message.serverContent?.interrupted) {
+              console.log("Model interrupted");
+              audioQueueRef.current.forEach(source => {
+                try { source.stop(); } catch(e){}
+              });
+              audioQueueRef.current.clear();
+              nextStartTimeRef.current = 0; // Reset timing
+            }
+          },
+          onclose: (e) => {
+            console.log("Gemini Live Session Closed", e);
+            disconnect();
+          },
+          onerror: (e) => {
+            console.error("Gemini Live API Error", e);
+            setError("Connection error occurred.");
+            disconnect();
+          }
+        }
+      });
+      
+      sessionRef.current = sessionPromise;
+
+    } catch (err: any) {
+      console.error("Connection failed:", err);
+      setError(err.message || "Failed to connect");
+      setIsConnecting(false);
+      disconnect();
+    }
+  }, [disconnect, isConnecting, isConnected]);
+
+  return {
+    connect,
+    disconnect,
+    isConnected,
+    isConnecting,
+    error,
+    analyser
+  };
+};
+</file>
+
+<file path="utils/audioUtils.ts">
+import { Blob } from '@google/genai';
+
+export function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binaryString = window.atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
+}
+
+export async function decodeAudioData(
+  data: ArrayBuffer,
+  ctx: AudioContext,
+  sampleRate: number = 24000,
+  numChannels: number = 1
+): Promise<AudioBuffer> {
+  const dataInt16 = new Int16Array(data);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
+  }
+  return buffer;
+}
+
+export function createPcmBlob(data: Float32Array): Blob {
+    const l = data.length;
+    const int16 = new Int16Array(l);
+    for (let i = 0; i < l; i++) {
+      // Clamp values to [-1, 1] range before scaling
+      const s = Math.max(-1, Math.min(1, data[i]));
+      int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    return {
+      data: arrayBufferToBase64(int16.buffer),
+      mimeType: 'audio/pcm;rate=16000',
+    };
+}
+</file>
+
+<file path=".gitignore">
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+</file>
+
+<file path="App.tsx">
+import React, { useEffect, useState } from 'react';
+import { useLiveAPI } from './hooks/useLiveAPI';
+import AudioVisualizer from './components/AudioVisualizer';
+import { Mic, MicOff, Phone, PhoneOff, AlertCircle, Info, GraduationCap } from 'lucide-react';
+
+const App: React.FC = () => {
+  const { connect, disconnect, isConnected, isConnecting, error, analyser } = useLiveAPI();
+  const [showInfo, setShowInfo] = useState(false);
+
+  // Auto-scroll logic or other UI effects could go here
+  
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-900">
+      
+      {/* Header */}
+      <header className="bg-white shadow-sm sticky top-0 z-10">
+        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+             <div className="bg-blue-900 p-2 rounded-lg text-white">
+                <GraduationCap size={24} />
+             </div>
+             <div>
+                <h1 className="text-xl font-bold text-slate-800 leading-tight">Nopany High School</h1>
+                <p className="text-xs text-slate-500 font-medium tracking-wide uppercase">AI Receptionist</p>
+             </div>
+          </div>
+          <button 
+            onClick={() => setShowInfo(!showInfo)}
+            className="text-slate-400 hover:text-slate-600 transition-colors"
+          >
+            <Info size={24} />
+          </button>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col items-center justify-center p-6 relative overflow-hidden">
+        
+        {/* Info Modal/Overlay */}
+        {showInfo && (
+          <div className="absolute top-4 right-4 max-w-sm bg-white p-4 rounded-xl shadow-lg border border-slate-100 z-20 text-sm animate-in fade-in slide-in-from-top-4">
+             <h3 className="font-semibold mb-2 flex items-center gap-2">
+                <Info size={16} className="text-blue-600"/> About this AI
+             </h3>
+             <p className="text-slate-600 mb-2">
+                This AI receptionist can answer questions about admissions, fees, staff, and school policies based on the official school handbook.
+             </p>
+             <p className="text-slate-600">
+                It supports <strong>English, Hindi, and Bengali</strong>. Just start speaking!
+             </p>
+          </div>
+        )}
+
+        <div className="w-full max-w-md flex flex-col items-center space-y-10 z-0">
+          
+          {/* Status Text */}
+          <div className="text-center space-y-2">
+            <h2 className="text-3xl font-bold text-slate-800">
+              {isConnected 
+                ? "Listening..." 
+                : isConnecting 
+                  ? "Connecting..." 
+                  : "How can I help you?"}
+            </h2>
+            <p className="text-slate-500 text-lg">
+               {isConnected 
+                 ? "Go ahead, ask me about fees or admissions." 
+                 : "Tap the button below to start a call."}
+            </p>
+          </div>
+
+          {/* Visualizer & Avatar Area */}
+          <div className="relative w-72 h-72 flex items-center justify-center">
+            {/* Background Rings */}
+            <div className={`absolute inset-0 rounded-full border-4 border-slate-100 ${isConnected ? 'animate-pulse' : ''}`}></div>
+            <div className={`absolute inset-4 rounded-full border-4 border-slate-50 ${isConnected ? 'animate-ping opacity-20' : ''}`}></div>
+
+            {/* Visualizer Container */}
+            <div className="w-64 h-32 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 flex items-center justify-center opacity-80 pointer-events-none">
+                 {/* We only show visualizer when connected to indicate activity */}
+                <AudioVisualizer analyser={analyser} isActive={isConnected} barColor="#2563EB" />
+            </div>
+            
+            {/* Central Icon */}
+            <div className={`relative z-20 w-32 h-32 rounded-full flex items-center justify-center shadow-xl transition-all duration-500 
+                ${isConnected ? 'bg-blue-600 shadow-blue-200 scale-110' : 'bg-white shadow-slate-200'}`}>
+                {isConnected ? (
+                   <Mic className="text-white w-12 h-12" />
+                ) : (
+                   <MicOff className="text-slate-300 w-12 h-12" />
+                )}
+            </div>
+          </div>
+
+          {/* Controls */}
+          <div className="flex flex-col items-center space-y-4 w-full">
+            {error && (
+               <div className="bg-red-50 text-red-600 px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2">
+                 <AlertCircle size={16} />
+                 {error}
+               </div>
+            )}
+            
+            {!isConnected ? (
+              <button
+                onClick={connect}
+                disabled={isConnecting}
+                className={`group relative flex items-center justify-center gap-3 px-8 py-4 rounded-full text-white font-semibold text-lg transition-all duration-200 shadow-lg hover:shadow-xl hover:-translate-y-1 w-full max-w-xs
+                    ${isConnecting ? 'bg-slate-400 cursor-wait' : 'bg-blue-600 hover:bg-blue-700'}`}
+              >
+                 <Phone size={24} className={isConnecting ? 'animate-spin' : ''} />
+                 <span>{isConnecting ? 'Connecting...' : 'Start Conversation'}</span>
+              </button>
+            ) : (
+              <button
+                onClick={disconnect}
+                className="group flex items-center justify-center gap-3 px-8 py-4 rounded-full bg-red-100 text-red-600 font-semibold text-lg transition-all duration-200 shadow-sm hover:bg-red-200 hover:shadow-md w-full max-w-xs"
+              >
+                <PhoneOff size={24} />
+                <span>End Call</span>
+              </button>
+            )}
+            
+            <p className="text-xs text-slate-400 text-center max-w-xs">
+               Microphone access required. Please speak clearly for the best experience.
+            </p>
+          </div>
+        </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="bg-white border-t border-slate-100 py-4 text-center text-slate-400 text-xs">
+         <p>© 2026 Nopany High School. All rights reserved.</p>
+         <p className="mt-1">Powered by Gemini 2.5 Live API</p>
+      </footer>
+    </div>
+  );
+};
+
+export default App;
+</file>
+
+<file path="index.html">
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nopany High AI Receptionist</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      body {
+        font-family: 'Inter', sans-serif;
+      }
+      .visualizer-bar {
+        transition: height 0.05s ease;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "@google/genai": "https://esm.sh/@google/genai@^1.37.0",
+    "lucide-react": "https://esm.sh/lucide-react@^0.562.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-slate-50 text-slate-900">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
+</file>
+
+<file path="index.tsx">
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("Could not find root element to mount to");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+</file>
+
+<file path="metadata.json">
+{
+  "name": "Nopany High AI Receptionist",
+  "description": "A voice-enabled AI receptionist for Nopany High School, capable of answering queries about fees, admissions, and more in multiple languages.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
+</file>
+
+<file path="package.json">
+{
+  "name": "nopany-high-ai-receptionist",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "@google/genai": "^1.37.0",
+    "lucide-react": "^0.562.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}
+</file>
+
+<file path="README.md">
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+</div>
+
+# Run and deploy your AI Studio app
+
+This contains everything you need to run your app locally.
+
+View your app in AI Studio: https://ai.studio/apps/drive/1yyeuoGtbWWEWrRbGRQdIeKCSVDttvGqp
+
+## Run Locally
+
+**Prerequisites:**  Node.js
+
+
+1. Install dependencies:
+   `npm install`
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+3. Run the app:
+   `npm run dev`
+</file>
+
+<file path="tsconfig.json">
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+    "module": "ESNext",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ],
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "allowJs": true,
+    "jsx": "react-jsx",
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    },
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  }
+}
+</file>
+
+<file path="vite.config.ts">
+import path from 'path';
+import { defineConfig, loadEnv } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig(({ mode }) => {
+    const env = loadEnv(mode, '.', '');
+    return {
+      server: {
+        port: 3000,
+        host: '0.0.0.0',
+        allowedHosts: [
+          'ganglier-undelivered-marshall.ngrok-free.dev'
+        ],
+      },
+      plugins: [react()],
+      define: {
+        'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+      },
+      resolve: {
+        alias: {
+          '@': path.resolve(__dirname, '.'),
+        }
+      }
+    };
+});
+</file>
+
+<file path="utils/schoolData.ts">
+export const SCHOOL_KNOWLEDGE_BASE = `
+====================
+SECTION A: General School Info:
+====================
+
+**School Hours (Monday to Friday)**
+Start: 08:00:00
+
+**Dismissal:**
+Grade Nursery: 11:00:00
+Grade LKG to Class II: 12:15:00
+Class III to Class XII: 14:00:00
+
+**Break Time:**
+Fruit Break: 9:40 AM to 9:50 AM
+Long Break: 11:10 AM to 11:30 AM
+
+**School Hours (2nd & 4th Saturday) (III to XII)**
+Start: 09:15:00
+Dismissal: 11:15:00
+Address: 2-C, Nando Mullick Lane, Kolkata - 700006
+  - Landmark: Near Gate No. 2 of Girish Park Metro Station
+Phone Numbers: (033) 25338503, 25301971, 46035857
+Mobile Numbers: 7003762594
+E-mail ID for the Main Office: info@nopanyhigh.com
+
+**List of Holidays and closures:**
+Holiday: New Session 2026-2027 begins | Date: 2026-04-06 (Monday)
+Holiday: Ambedkar Jayanti | Date: 2026-04-14 (Tuesday)
+Holiday: Bengali New Year | Date: 2026-04-15 (Wednesday)
+Holiday: May Day & Buddha Purnima | Date: 2026-05-01 (Friday)
+Holiday: Summer Vacation begins | Date: 2026-05-18 (Monday)
+Holiday: School re-opens after Summer Vacation | Date: 2026-06-15 (Monday)
+Holiday: Eid-al-Azha | Date: 2026-05-27 (Wednesday)
+Holiday: Muharram | Date: 2026-06-26 (Friday)
+Holiday: Independendence Day | Date: 2026-08-15 (Saturday)
+Holiday: Eid-milad-un-nabi | Date: 2026-08-26 (Wednesday)
+Holiday: Raksha Bandhan | Date: 2026-08-28 (Friday)
+Holiday: Janmasthami | Date: 2026-09-04 (Friday)
+Holiday: Ganesh Chaturthi | Date: 2026-09-14 (Monday)
+Holiday: Vishwakarma Puja | Date: 2026-09-17 (Thursday)
+Holiday: Gandhi Jayanti | Date: 2026-10-02 (Friday)
+Holiday: Mahalaya | Date: 2026-10-10 (Saturday)
+Holiday: Puja Vacation begins | Date: 2026-10-15 (Thursday)
+Holiday: School re-opens after Puja Vacation | Date: 2026-10-27 (Tuesday)
+Holiday: Diwali Vacation begins | Date: 2026-11-06 (Friday)
+Holiday: School re-opens after Diwali Vacation | Date: 2026-11-16 (Monday)
+Holiday: Chhath Puja | Date: 2026-11-15 (Sunday)
+Holiday: Guruk Nanak Jayanti | Date: 2026-11-24 (Tuesday)
+Holiday: Winter Vacation begins | Date: 2026-12-24 (Thursday)
+Holiday: School re-opens after Wnter Vacation | Date: 2027-01-04 (Monday)
+Holiday: Swami Vivekananda's Birthday | Date: 2027-01-12 (Tuesday)
+Holiday: Makar Sankranti | Date: 2027-01-15 (Friday)
+Holiday: Netaji's Birthday | Date: 2027-01-23 (Saturday)
+Holiday: Shab-e-Barat | Date: 2027-01-24 (Sunday)
+Holiday: Republic Day | Date: 2027-01-26 (Tuesday)
+Holiday: Saraswati Puja | Date: 2027-02-11 (Thursday)
+Holiday: Immersion | Date: 2027-02-12 (Friday)
+Holiday: Eid-ul-Fitr | Date: 2027-03-10 (Wednesday)
+Holiday: Dol and Holi | Date: 2027-03-22 (Monday)
+
+=================== 
+SECTION B: Admissions & Fees:
+=================== 
+
+Investment in Excellence: Fee Structure (2026-2027)
+Our fee structure is curated to provide premium academic delivery, state-of-the-art infrastructure, and holistic development. We ensure every rupee contributes directly to your child's future readiness.
+
+-Note: All fees are in INR (Rupees).
+
+-- Fee Structure -- 
+
+Type: Monthly Tuition Fees (Comprehensive Academic Guidance) Covers expert faculty, personalized mentorship, and daily classroom excellence.
+
+Pre-Nursery to UKG: 2400
+Class I & II: 2750
+Class III to VIII: 3150
+Class IX & X: 3415
+Class XI & XII: 3900
+
+Type: Quarterly Term Fees (Holistic Development & Infrastructure) Paid in Apr, Jul, Oct & Jan. Supports science labs, libraries, sports facilities, and co-curricular activities.
+
+Pre-Nursery to UKG: 3315
+Class I & II: 3675
+Class III to VIII: 3850
+Class IX & X: 3885
+Class XI & XII: 4505
+
+Type: Annual Session Charges (New Session Essentials) Paid at the beginning of the session. Covers digital learning tools, examination logistics, and annual academic resources.
+
+Pre-Nursery to UKG: 9000
+Class I & II: 13125
+Class III to VIII: 15750
+Class IX & X: 18375
+Class XI & XII: 18375
+
+Type: Admission Fees (One-Time Enrollment) A one-time investment for lifetime campus access and administrative setup.
+
+Pre-Nursery to UKG: 18000
+Class I & II: 18000
+Class III to VIII: 18000
+Class IX & X: 18000
+Class XI & XII: 18000
+
+
+-- Age Criteria --
+Class: Pre-Nursery | Minimum Age: 2+ years
+Class: Nursery | Minimum Age: 3+ years
+Class: LKG | Minimum Age: 4+ years
+Class: UKG | Minimum Age: 5+ years
+Class: Class I | Minimum Age: 6+ years
+Class: Class II | Minimum Age: 7+ years
+Class: Class III | Minimum Age: 8+ years
+Class: Class IV | Minimum Age: 9+ years
+Class: Class V | Minimum Age: 10+ years
+Class: Class VI | Minimum Age: 11+ years
+Class: Class VII | Minimum Age: 12+ years
+Class: Class VIII | Minimum Age: 13+ years
+Class: Class IX | Minimum Age: 14+ years
+Documents required for new students: 
+  - 1. Xerox copy of students' Birth Certificate
+  - 2. Xerox copy of AADHAAR Card of student & parents
+  - 3. Xerox copy of last school's ID card of student
+  - 4. Xerox copy of students's Report  Card of last school attended
+  - 5. Original Transfer Certificate of student of last school attended
+  - 6. 1 copy Passport size colour photograph of student
+  - N.B.: All the above original documents are to be brought for verification at the time of admission.
+
+====================
+SECTION C: Staff Directory:
+====================
+Name of the Principal: DIBYENDU SEN SHARMA
+Coordinator: DEBAPRATIM MUKHERJEE
+Academic Coordinators: MADHUCHANDA BASU
+  - ANJANA HELA
+  - SONALI GUPTA
+  - SATABDI PANIGRAHI
+School Counsellor: SREEPARNA MITRA
+
+**Which teacher teaches which subject/grade:**
+
+-- Teacher Subject Mapping --
+Teacher: Akshata Pal | Classes: III-XII | Subjects: Art & Craft & SUPW
+Teacher: Anindita De | Classes: IV to VII | Subjects: English I & II
+Teacher: Anjana Hela | Classes: IX - XII | Subjects: Commercial Applications, Accounts, BSTD & Commerce
+Teacher: Anshika Jaiswal | Classes: IX - XII | Subjects: Economic Applications & Economics
+Teacher: Aparna Roy | Classes: VIII - XII | Subjects: English & Modern English
+Teacher: Avinash Kapoor | Classes: VII and XI & XII | Subjects: Mathematics & Applied Mathematics
+Teacher: Chandrani Chatterjee | Classes: Pre-Primary & XII | Subjects: Nursery - All Subjects, I & II - Activity, XII - Political Science
+Teacher: Debapratim Mukherjee | Classes: IX to XII | Subjects: Commercial Studies, Accounts, Commerce & Business Studies
+Teacher: Ilika Das | Classes: III, VI, VIII, IX & XII | Subjects: Bengali 2nd Language & 3rd Language
+Teacher: Kanchan Lata Singh | Classes: III, VI, VIII, IX & XII | Subjects: Hindi 2nd Language & 3rd Language
+Teacher: Madhuchanda Basu | Classes: VI - XII | Subjects: Computer, Computer Applications & Computer Science
+Teacher: Miramrita Das | Classes: Nursery to VIII | Subjects: Dance, Yoga & Activity
+Teacher: Monami Das | Classes: V, VIII, X, XI & XII | Subjects: Chemistry, EVS & Science
+Teacher: Moumita Saha | Classes: IV, V, VII, X & XI | Subjects: Bengali 2nd Language & 3rd Language
+Teacher: Neelam Pathak | Classes: IV, V, VII, X & XI | Subjects: Hindi 2nd Language & 3rd Language
+Teacher: Nikhilesh Upadhyay | Classes: VI, VII, IX, XI & XII | Subjects: Chemistry, Physics & Biology
+Teacher: Priyanka Ghosh | Classes: Pre-Primary | Subjects: Languages, Mathematics, Computer, G.K., Creative Expression
+Teacher: Riya Shaw | Classes: I to IV, IX & X | Subjects: EVS, Social Studies & Hindi
+Teacher: Sanghamitra Roy | Classes: III, IV & VI | Subjects: English I & II, Science & Mathematics
+Teacher: Sanjana Banerjee | Classes: VI to X & XII | Subjects: Geography & EVS
+Teacher: Satabdi Panigrahi | Classes: V, VI, VII & XI | Subjects: Psychology, Political Science, EVS & History
+Teacher: Sayan Roy | Classes: III - XII | Subjects: P.T. & Games
+Teacher: Sayantani Bhowmick | Classes: V - VIII | Subjects: Mathematics
+Teacher: Shivani Priyadarshini | Classes: VIII to XII | Subjects: Physics
+Teacher: Shrestha Sarkar | Classes: II | Subjects: All subjects
+Teacher: Sibsankar Barai | Classes: IX to XII | Subjects: Mathematics
+Teacher: Somali Ghosh | Classes: I, IV & V | Subjects: I - All subjects, IV & V - Computer
+Teacher: Sonali Gupta | Classes: VIII to XII | Subjects: History
+Teacher: Sudipta Roy | Classes: VIII - XII | Subjects: English I & II and Mathematics
+Teacher: Sukanya Sah | Classes: LKG | Subjects: All subjects
+Teacher: Upasana Basu Sinha | Classes: VII to XII | Subjects: Biology
+Teacher: Sreeparna Mitra | Classes: I to V | Subjects: Spelling & Dictation, G.K. & Activity
+
+====================
+SECTION D: Events & Calender:
+====================
+
+**Upcoming events (Sports Day, Science Fair, Parents' Meeting)**
+
+-- Upcoming Events --
+Event: Inter House Rabindra Jayanti (Classes VI-XII) Drama, Dance, Recitation | Date: 2026-05-09 (Saturday)
+Event: Mother's Day Celebration (Classes Nursery-II) | Date: 2026-05-11 (Monday)
+Event: NERDNIA (Annual School Exhibition) | Date: 2026-05-14 (Thursday)
+Event: International Yoga Day (Classes IV-VIII) | Date: 2026-06-22 (Monday)
+Event: Father's Day Celebration (Classes III-V) | Date: 2026-06-27 (Saturday)
+Event: Rath Yatra Celebration (Classes Nursery-II) | Date: 2026-07-16 (Thursday)
+Event: Munshi Premchand's Jayanti (Classes VI-XII) | Date: 2026-07-31 (Friday)
+Event: Independence Day Celebration & Inter House Roller Skating & Karate Competition | Date: 2026-08-15 (Saturday)
+Event: Raksha Bandhan (Classes Nursery-V) | Date: 2026-08-28 (Friday)
+Event: Investiture Ceremony | Date: 2026-08-29 (Saturday)
+Event: Teachers' Day Celebration | Date: 2026-09-04 (Friday)
+Event: Inter House Diya (Classes III-V) & Rangoli Making (Classes VI - VIII) | Date: 2026-11-05 (Thursday)
+Event: Excursion for Junior & Senior Classes | Date: 2026-11-14 (Saturday)
+Event: Sports for Junior & Senior Classes | Date: 2026-12-04 (Friday)
+Event: Christmas Celebration (Classes Nursery-V) | Date: 2026-12-23 (Thursday)
+Event: Republic Day Celebration | Date: 2027-01-26 (Tuesday)
+Event: Saraswati Puja & Farewell | Date: 2027-02-11 (Thursday)
+Event: Idol Immersion | Date: 2027-02-12 (Friday)
+Event: Graduation Day (Classes Nursery-II) | Date: 2027-03-27 (Friday)
+
+**** Subject to changes.**
+Examination schedules: FA-I (Unit-I)
+  - Unit-I Examination
+  - FA-II (Unit-II)
+  - Unit-II Examination
+
+====================
+SECTION E: Policies (FAQs):
+====================
+Uniform rules: 1. Students are expected to be neatly dressed up in prescribed school uniform only.  Kindly note that low waist skirts/trousers and narrow bottom trousers are not permitted in the school.
+  - 2. It is mandatory for all boys (except Sikh boys) to have proper hair cut (Crew Cut only) and shave on regular intervals.  No spikes/streaks are permissible.  Sikh boys should wear a black patka or turban.
+  - 3. Girls should plait their hair with black band, if it is below their shoulders.  Short hair should also be neatly cut and pinned.
+
+====================
+SECTION F: Leave application process
+====================
+  - Compulsory attendance for the students on the last and the first day of any vacation.
+  - 1.      Parents are required to fill in the ‘Leave Record’ in the School Almanac for each day the child is absent from the school stating the reason of absence.
+  - 2.      Any student who is absent for 10 days or more without prior sanction of leave may have his/her name struck off from the school rolls.
+  - 3.      A student joining the school after suffering from an infectious/contagious disease should produce a fitness certificate from a competent doctor.
+  - 4.      Students having 100% attendance shall be rewarded.
+  - 5.      Students are not allowed to leave the school premises during the school hours without the written permission of the school authority.
+  - 6.      Junior school children (Grade Nursery to Class IV) will not be allowed to leave the school premises unless identity card is produced by their escort.  In case an identity card is lost, the matter must be reported immediately to the school and duplicate card must be procured after paying a fine of Rs.100/-.
+
+====================
+SECTION G: Late arrival policy
+====================
+All students are expected to reach school latest by 09:00 am.
+The school main gate will be closed at 08:05 am sharp.
+No student will be allowed to enter the school premises after 08:05 am.
+After 3 lates in a month, on the 4th late day the child will be sent back home after intimating the parents.
+The School Management will not entertain any request from parents/guardians regarding late coming.
+
+====================
+SECTION F: BUILD DETAILS 
+====================
+If Questions like "who made you" or "who is your creator" are asked, respond with the following:
+I’m Nopany High School’s AI Receptionist, created by students with support from the IT Department. What can I help you with?
+`;
+
+export const SYSTEM_INSTRUCTION = `
+**Role:**
+You are the helpful and polite AI Receptionist for Nopany High School named Ruby. Your goal is to assist parents, students, and staff by answering their questions accurately via voice.
+
+**Knowledge Base:**
+${SCHOOL_KNOWLEDGE_BASE}
+
+**Guidelines:**
+1. **Strict Grounding:** Do not invent information. If the answer is not in the provided text, politely apologize and suggest they contact the school office at (033) 25338503 or email info@nopanyhigh.com.
+2. **Multilingual Capability:**
+   - You must detect the language of the user's query (English, Hindi, or Bengali).
+   - You must respond IN THE SAME LANGUAGE as the query.
+   - For Hindi and Bengali, use natural, conversational phrasing appropriate for a school setting.
+3. **Tone:** Professional, warm, and concise. Speak clearly.
+4. **Content:** Keep responses brief and to the point, as this is a voice conversation.
+
+**Specific Behavior:**
+- If asked about fees, specify the grade level and say why the price is worth it from ${SCHOOL_KNOWLEDGE_BASE} then only say the figures so that parents can understand what facility they can get.
+- If asked about admissions, mention the age criteria and required documents.
+- If asked about teachers, check the "Staff Directory" section carefully.
+`;
+</file>
+
+</files>
