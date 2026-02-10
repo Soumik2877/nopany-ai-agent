@@ -1,7 +1,11 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { SYSTEM_INSTRUCTION } from '../utils/schoolData';
 import { createPcmBlob, base64ToArrayBuffer, decodeAudioData } from '../utils/audioUtils';
+
+interface UseLiveAPIOptions {
+  onModelText?: (text: string) => void;
+}
 
 interface UseLiveAPIResult {
   connect: () => Promise<void>;
@@ -12,7 +16,7 @@ interface UseLiveAPIResult {
   analyser: AnalyserNode | null; // For visualization
 }
 
-export const useLiveAPI = (): UseLiveAPIResult => {
+export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -170,6 +174,18 @@ export const useLiveAPI = (): UseLiveAPIResult => {
 
               } catch (decodeErr) {
                 console.error("Audio decode error:", decodeErr);
+              }
+            }
+
+            // Handle text output (if provided) so the agent can trigger actions.
+            const parts = message.serverContent?.modelTurn?.parts;
+            if (parts && options?.onModelText) {
+              const combinedText = parts
+                .map((p: any) => (typeof p.text === 'string' ? p.text : ''))
+                .join(' ')
+                .trim();
+              if (combinedText) {
+                options.onModelText(combinedText);
               }
             }
 

@@ -1,13 +1,55 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useLiveAPI } from './hooks/useLiveAPI';
+import { openHand, closeHand, setEyeExpression } from './hooks/useHandAPI';
+import { eyeExpressionFromText } from './utils/eyeExpressionFromText';
 import AudioVisualizer from './components/AudioVisualizer';
 import { Mic, MicOff, Phone, PhoneOff, AlertCircle, Info, GraduationCap } from 'lucide-react';
 
 const App: React.FC = () => {
-  const { connect, disconnect, isConnected, isConnecting, error, analyser } = useLiveAPI();
   const [showInfo, setShowInfo] = useState(false);
+  const [handError, setHandError] = useState<string | null>(null);
+  const [handBusy, setHandBusy] = useState(false);
 
-  // Auto-scroll logic or other UI effects could go here
+  const { connect, disconnect, isConnected, isConnecting, error, analyser } = useLiveAPI({
+    onModelText: async (text: string) => {
+      const lower = text.toLowerCase();
+
+      if (handBusy) {
+        return;
+      }
+
+      try {
+        if (lower.includes('open hand') || lower.includes('release the hand')) {
+          setHandError(null);
+          setHandBusy(true);
+          await openHand();
+        } else if (lower.includes('close hand') || lower.includes('grab with your hand') || lower.includes('close your hand')) {
+          setHandError(null);
+          setHandBusy(true);
+          await closeHand();
+        }
+      } catch (e: any) {
+        setHandError(e?.message || 'Hand action failed');
+      } finally {
+        setHandBusy(false);
+      }
+
+      // Update LED eyes to match AI response
+      try {
+        const expression = eyeExpressionFromText(text);
+        await setEyeExpression(expression);
+      } catch {
+        // Ignore eyes API errors (e.g. backend not running or no hardware)
+      }
+    },
+  });
+
+  // Set eyes by call state: neutral when connected, blink when disconnected
+  useEffect(() => {
+    if (isConnecting) return;
+    const expression = isConnected ? 'neutral' : 'blink';
+    setEyeExpression(expression).catch(() => {});
+  }, [isConnected, isConnecting]);
   
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-900">
@@ -100,6 +142,13 @@ const App: React.FC = () => {
                  {error}
                </div>
             )}
+
+            {handError && (
+              <div className="bg-amber-50 text-amber-700 px-4 py-2 rounded-full text-xs font-medium flex items-center gap-2">
+                <AlertCircle size={14} />
+                {handError}
+              </div>
+            )}
             
             {!isConnected ? (
               <button
@@ -121,6 +170,54 @@ const App: React.FC = () => {
               </button>
             )}
             
+            {/* Hand controls */}
+            <div className="flex gap-3 w-full max-w-xs">
+              <button
+                type="button"
+                disabled={handBusy}
+                onClick={async () => {
+                  try {
+                    setHandError(null);
+                    setHandBusy(true);
+                    await openHand();
+                  } catch (e: any) {
+                    setHandError(e?.message || 'Failed to open hand');
+                  } finally {
+                    setHandBusy(false);
+                  }
+                }}
+                className={`flex-1 px-4 py-2 rounded-full text-sm font-semibold border transition-colors ${
+                  handBusy
+                    ? 'bg-slate-200 text-slate-500 border-slate-200 cursor-wait'
+                    : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                Open Hand
+              </button>
+              <button
+                type="button"
+                disabled={handBusy}
+                onClick={async () => {
+                  try {
+                    setHandError(null);
+                    setHandBusy(true);
+                    await closeHand();
+                  } catch (e: any) {
+                    setHandError(e?.message || 'Failed to close hand');
+                  } finally {
+                    setHandBusy(false);
+                  }
+                }}
+                className={`flex-1 px-4 py-2 rounded-full text-sm font-semibold border transition-colors ${
+                  handBusy
+                    ? 'bg-slate-200 text-slate-500 border-slate-200 cursor-wait'
+                    : 'bg-slate-900 text-white border-slate-900 hover:bg-slate-800'
+                }`}
+              >
+                Close Hand
+              </button>
+            </div>
+
             <p className="text-xs text-slate-400 text-center max-w-xs">
                Microphone access required. Please speak clearly for the best experience.
             </p>
