@@ -25,17 +25,3 @@ export const closeHand = async (): Promise<void> => {
   }
 };
 
-// --- LED eyes (same backend) ---
-
-export const setEyeExpression = async (expression: string): Promise<void> => {
-  const base = getHandApiBaseUrl();
-  const res = await fetch(`${base}/eyes/expression`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ expression }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { detail?: string })?.detail || `Eyes API: ${res.status}`);
-  }
-};
