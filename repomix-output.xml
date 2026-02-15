@@ -43,9 +43,11 @@ The content is organized as follows:
 components/
   AudioVisualizer.tsx
 hooks/
+  useHandAPI.ts
   useLiveAPI.ts
 utils/
   audioUtils.ts
+  eyeExpressionFromText.ts
   schoolData.ts
 .gitignore
 App.tsx
@@ -165,11 +167,352 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ analyser, isActive, b
 export default AudioVisualizer;
 </file>
 
+<file path="hooks/useHandAPI.ts">
+export const getHandApiBaseUrl = (): string => {
+  // Vite inlines env vars at build time. We use the raw key
+  // because loadEnv in vite.config is configured with no VITE_ prefix.
+  const base = import.meta.env.HAND_API_BASE_URL as string | undefined;
+  return base || 'http://localhost:8000';
+};
+
+export const openHand = async (): Promise<void> => {
+  const base = getHandApiBaseUrl();
+  const res = await fetch(`${base}/hand/open`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to open hand: ${res.status}`);
+  }
+};
+
+export const closeHand = async (): Promise<void> => {
+  const base = getHandApiBaseUrl();
+  const res = await fetch(`${base}/hand/close`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to close hand: ${res.status}`);
+  }
+};
+
+// --- LED eyes (same backend) ---
+
+export const setEyeExpression = async (expression: string): Promise<void> => {
+  const base = getHandApiBaseUrl();
+  const res = await fetch(`${base}/eyes/expression`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expression }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { detail?: string })?.detail || `Eyes API: ${res.status}`);
+  }
+};
+</file>
+
+<file path="utils/audioUtils.ts">
+import { Blob } from '@google/genai';
+
+export function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binaryString = window.atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
+}
+
+export async function decodeAudioData(
+  data: ArrayBuffer,
+  ctx: AudioContext,
+  sampleRate: number = 24000,
+  numChannels: number = 1
+): Promise<AudioBuffer> {
+  const dataInt16 = new Int16Array(data);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
+  }
+  return buffer;
+}
+
+export function createPcmBlob(data: Float32Array): Blob {
+    const l = data.length;
+    const int16 = new Int16Array(l);
+    for (let i = 0; i < l; i++) {
+      // Clamp values to [-1, 1] range before scaling
+      const s = Math.max(-1, Math.min(1, data[i]));
+      int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    return {
+      data: arrayBufferToBase64(int16.buffer),
+      mimeType: 'audio/pcm;rate=16000',
+    };
+}
+</file>
+
+<file path="utils/eyeExpressionFromText.ts">
+/**
+ * Maps AI response text to an LED eyes expression name.
+ * Used so the robot's eyes react to what the AI is saying.
+ */
+const EXPRESSIONS = [
+  'neutral',
+  'happy',
+  'sad',
+  'angry',
+  'surprised',
+  'blink',
+  'sleepy',
+  'love',
+] as const;
+
+export type EyeExpression = (typeof EXPRESSIONS)[number];
+
+/** Keywords/phrases per expression (lowercase). First match wins. */
+const EXPRESSION_KEYWORDS: Record<EyeExpression, string[]> = {
+  sad: [
+    'sorry', 'apolog', 'unfortunately', 'regret', 'sad', 'unable to',
+    'i\'m sorry', 'we regret', 'unable to help',
+  ],
+  angry: [
+    'cannot do that', 'can\'t do that', 'unacceptable', 'must not',
+  ],
+  love: [
+    'love to', 'dear ', 'appreciate', 'glad you', 'thank you so much',
+  ],
+  happy: [
+    'welcome', 'glad', 'happy to', 'great', 'thank you', 'thanks',
+    'hello', 'hi ', 'good morning', 'good afternoon', 'good day',
+    'pleasure', 'wonderful', 'excellent', 'good to hear', 'sure',
+    'certainly', 'of course', 'absolutely', 'here you go', 'here is',
+  ],
+  surprised: [
+    'oh ', 'really?', 'interesting', 'actually', 'let me check',
+    'let me see', 'good question', '?',
+  ],
+  sleepy: [
+    'goodbye', 'bye', 'good night', 'have a nice day', 'take care',
+    'rest of your day', 'anything else?',
+  ],
+  blink: [],
+  neutral: [],
+};
+
+export function eyeExpressionFromText(text: string): EyeExpression {
+  const lower = text.toLowerCase().trim();
+  if (!lower) return 'neutral';
+
+  for (const [expr, keywords] of Object.entries(EXPRESSION_KEYWORDS) as [EyeExpression, string[]][]) {
+    if (expr === 'neutral' || expr === 'blink') continue;
+    for (const kw of keywords) {
+      if (lower.includes(kw)) return expr;
+    }
+  }
+
+  return 'neutral';
+}
+</file>
+
+<file path=".gitignore">
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+</file>
+
+<file path="index.html">
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nopany High AI Receptionist</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      body {
+        font-family: 'Inter', sans-serif;
+      }
+      .visualizer-bar {
+        transition: height 0.05s ease;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "@google/genai": "https://esm.sh/@google/genai@^1.37.0",
+    "lucide-react": "https://esm.sh/lucide-react@^0.562.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-slate-50 text-slate-900">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
+</file>
+
+<file path="index.tsx">
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("Could not find root element to mount to");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+</file>
+
+<file path="metadata.json">
+{
+  "name": "Nopany High AI Receptionist",
+  "description": "A voice-enabled AI receptionist for Nopany High School, capable of answering queries about fees, admissions, and more in multiple languages.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
+</file>
+
+<file path="package.json">
+{
+  "name": "nopany-high-ai-receptionist",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "@google/genai": "^1.37.0",
+    "lucide-react": "^0.562.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}
+</file>
+
+<file path="README.md">
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+</div>
+
+# Run and deploy your AI Studio app
+
+This contains everything you need to run your app locally.
+
+View your app in AI Studio: https://ai.studio/apps/drive/1yyeuoGtbWWEWrRbGRQdIeKCSVDttvGqp
+
+## Run Locally
+
+**Prerequisites:**  Node.js
+
+
+1. Install dependencies:
+   `npm install`
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+3. Run the app:
+   `npm run dev`
+</file>
+
+<file path="tsconfig.json">
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+    "module": "ESNext",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ],
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "allowJs": true,
+    "jsx": "react-jsx",
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    },
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  }
+}
+</file>
+
 <file path="hooks/useLiveAPI.ts">
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { SYSTEM_INSTRUCTION } from '../utils/schoolData';
 import { createPcmBlob, base64ToArrayBuffer, decodeAudioData } from '../utils/audioUtils';
+
+interface UseLiveAPIOptions {
+  onModelText?: (text: string) => void;
+}
 
 interface UseLiveAPIResult {
   connect: () => Promise<void>;
@@ -180,7 +523,7 @@ interface UseLiveAPIResult {
   analyser: AnalyserNode | null; // For visualization
 }
 
-export const useLiveAPI = (): UseLiveAPIResult => {
+export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -341,6 +684,18 @@ export const useLiveAPI = (): UseLiveAPIResult => {
               }
             }
 
+            // Handle text output (if provided) so the agent can trigger actions.
+            const parts = message.serverContent?.modelTurn?.parts;
+            if (parts && options?.onModelText) {
+              const combinedText = parts
+                .map((p: any) => (typeof p.text === 'string' ? p.text : ''))
+                .join(' ')
+                .trim();
+              if (combinedText) {
+                options.onModelText(combinedText);
+              }
+            }
+
             // Handle Interruption
             if (message.serverContent?.interrupted) {
               console.log("Model interrupted");
@@ -384,101 +739,59 @@ export const useLiveAPI = (): UseLiveAPIResult => {
 };
 </file>
 
-<file path="utils/audioUtils.ts">
-import { Blob } from '@google/genai';
-
-export function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binaryString = window.atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes.buffer;
-}
-
-export function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return window.btoa(binary);
-}
-
-export async function decodeAudioData(
-  data: ArrayBuffer,
-  ctx: AudioContext,
-  sampleRate: number = 24000,
-  numChannels: number = 1
-): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data);
-  const frameCount = dataInt16.length / numChannels;
-  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
-
-  for (let channel = 0; channel < numChannels; channel++) {
-    const channelData = buffer.getChannelData(channel);
-    for (let i = 0; i < frameCount; i++) {
-      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
-    }
-  }
-  return buffer;
-}
-
-export function createPcmBlob(data: Float32Array): Blob {
-    const l = data.length;
-    const int16 = new Int16Array(l);
-    for (let i = 0; i < l; i++) {
-      // Clamp values to [-1, 1] range before scaling
-      const s = Math.max(-1, Math.min(1, data[i]));
-      int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-    }
-    return {
-      data: arrayBufferToBase64(int16.buffer),
-      mimeType: 'audio/pcm;rate=16000',
-    };
-}
-</file>
-
-<file path=".gitignore">
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-
-node_modules
-dist
-dist-ssr
-*.local
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-</file>
-
 <file path="App.tsx">
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useLiveAPI } from './hooks/useLiveAPI';
+import { openHand, closeHand, setEyeExpression } from './hooks/useHandAPI';
+import { eyeExpressionFromText } from './utils/eyeExpressionFromText';
 import AudioVisualizer from './components/AudioVisualizer';
 import { Mic, MicOff, Phone, PhoneOff, AlertCircle, Info, GraduationCap } from 'lucide-react';
 
 const App: React.FC = () => {
-  const { connect, disconnect, isConnected, isConnecting, error, analyser } = useLiveAPI();
   const [showInfo, setShowInfo] = useState(false);
+  const [handError, setHandError] = useState<string | null>(null);
+  const [handBusy, setHandBusy] = useState(false);
 
-  // Auto-scroll logic or other UI effects could go here
+  const { connect, disconnect, isConnected, isConnecting, error, analyser } = useLiveAPI({
+    onModelText: async (text: string) => {
+      const lower = text.toLowerCase();
+
+      if (handBusy) {
+        return;
+      }
+
+      try {
+        if (lower.includes('open hand') || lower.includes('release the hand')) {
+          setHandError(null);
+          setHandBusy(true);
+          await openHand();
+        } else if (lower.includes('close hand') || lower.includes('grab with your hand') || lower.includes('close your hand')) {
+          setHandError(null);
+          setHandBusy(true);
+          await closeHand();
+        }
+      } catch (e: any) {
+        setHandError(e?.message || 'Hand action failed');
+      } finally {
+        setHandBusy(false);
+      }
+
+      // Update LED eyes to match AI response
+      try {
+        const expression = eyeExpressionFromText(text);
+        await setEyeExpression(expression);
+      } catch {
+        // Ignore eyes API errors (e.g. backend not running or no hardware)
+      }
+    },
+  });
+
+  // Set eyes by call state: neutral when connected, blink when disconnected
+  useEffect(() => {
+    if (isConnecting) return;
+    const expression = isConnected ? 'neutral' : 'blink';
+    setEyeExpression(expression).catch(() => {});
+  }, [isConnected, isConnecting]);
   
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-900">
@@ -571,6 +884,13 @@ const App: React.FC = () => {
                  {error}
                </div>
             )}
+
+            {handError && (
+              <div className="bg-amber-50 text-amber-700 px-4 py-2 rounded-full text-xs font-medium flex items-center gap-2">
+                <AlertCircle size={14} />
+                {handError}
+              </div>
+            )}
             
             {!isConnected ? (
               <button
@@ -592,6 +912,54 @@ const App: React.FC = () => {
               </button>
             )}
             
+            {/* Hand controls */}
+            <div className="flex gap-3 w-full max-w-xs">
+              <button
+                type="button"
+                disabled={handBusy}
+                onClick={async () => {
+                  try {
+                    setHandError(null);
+                    setHandBusy(true);
+                    await openHand();
+                  } catch (e: any) {
+                    setHandError(e?.message || 'Failed to open hand');
+                  } finally {
+                    setHandBusy(false);
+                  }
+                }}
+                className={`flex-1 px-4 py-2 rounded-full text-sm font-semibold border transition-colors ${
+                  handBusy
+                    ? 'bg-slate-200 text-slate-500 border-slate-200 cursor-wait'
+                    : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                Open Hand
+              </button>
+              <button
+                type="button"
+                disabled={handBusy}
+                onClick={async () => {
+                  try {
+                    setHandError(null);
+                    setHandBusy(true);
+                    await closeHand();
+                  } catch (e: any) {
+                    setHandError(e?.message || 'Failed to close hand');
+                  } finally {
+                    setHandBusy(false);
+                  }
+                }}
+                className={`flex-1 px-4 py-2 rounded-full text-sm font-semibold border transition-colors ${
+                  handBusy
+                    ? 'bg-slate-200 text-slate-500 border-slate-200 cursor-wait'
+                    : 'bg-slate-900 text-white border-slate-900 hover:bg-slate-800'
+                }`}
+              >
+                Close Hand
+              </button>
+            </div>
+
             <p className="text-xs text-slate-400 text-center max-w-xs">
                Microphone access required. Please speak clearly for the best experience.
             </p>
@@ -609,152 +977,6 @@ const App: React.FC = () => {
 };
 
 export default App;
-</file>
-
-<file path="index.html">
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Nopany High AI Receptionist</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-      body {
-        font-family: 'Inter', sans-serif;
-      }
-      .visualizer-bar {
-        transition: height 0.05s ease;
-      }
-    </style>
-  <script type="importmap">
-{
-  "imports": {
-    "react/": "https://esm.sh/react@^19.2.3/",
-    "react": "https://esm.sh/react@^19.2.3",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-    "@google/genai": "https://esm.sh/@google/genai@^1.37.0",
-    "lucide-react": "https://esm.sh/lucide-react@^0.562.0"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
-</head>
-  <body class="bg-slate-50 text-slate-900">
-    <div id="root"></div>
-    <script type="module" src="/index.tsx"></script>
-  </body>
-</html>
-</file>
-
-<file path="index.tsx">
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import App from './App';
-
-const rootElement = document.getElementById('root');
-if (!rootElement) {
-  throw new Error("Could not find root element to mount to");
-}
-
-const root = ReactDOM.createRoot(rootElement);
-root.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
-</file>
-
-<file path="metadata.json">
-{
-  "name": "Nopany High AI Receptionist",
-  "description": "A voice-enabled AI receptionist for Nopany High School, capable of answering queries about fees, admissions, and more in multiple languages.",
-  "requestFramePermissions": [
-    "microphone"
-  ]
-}
-</file>
-
-<file path="package.json">
-{
-  "name": "nopany-high-ai-receptionist",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3",
-    "@google/genai": "^1.37.0",
-    "lucide-react": "^0.562.0"
-  },
-  "devDependencies": {
-    "@types/node": "^22.14.0",
-    "@vitejs/plugin-react": "^5.0.0",
-    "typescript": "~5.8.2",
-    "vite": "^6.2.0"
-  }
-}
-</file>
-
-<file path="README.md">
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
-
-# Run and deploy your AI Studio app
-
-This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/drive/1yyeuoGtbWWEWrRbGRQdIeKCSVDttvGqp
-
-## Run Locally
-
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
-</file>
-
-<file path="tsconfig.json">
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "experimentalDecorators": true,
-    "useDefineForClassFields": false,
-    "module": "ESNext",
-    "lib": [
-      "ES2022",
-      "DOM",
-      "DOM.Iterable"
-    ],
-    "skipLibCheck": true,
-    "types": [
-      "node"
-    ],
-    "moduleResolution": "bundler",
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "allowJs": true,
-    "jsx": "react-jsx",
-    "paths": {
-      "@/*": [
-        "./*"
-      ]
-    },
-    "allowImportingTsExtensions": true,
-    "noEmit": true
-  }
-}
 </file>
 
 <file path="vite.config.ts">
@@ -775,7 +997,8 @@ export default defineConfig(({ mode }) => {
       plugins: [react()],
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        'import.meta.env.HAND_API_BASE_URL': JSON.stringify(env.HAND_API_BASE_URL || 'http://localhost:8000'),
       },
       resolve: {
         alias: {

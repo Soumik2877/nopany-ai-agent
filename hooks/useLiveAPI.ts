@@ -99,7 +99,7 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
 
       // Setup Visualizer Analyser
       const newAnalyser = outputCtx.createAnalyser();
-      newAnalyser.fftSize = 256; // Smaller FFT size for smoother visuals
+      newAnalyser.fftSize = 128; // Smaller FFT size for smoother visuals
       setAnalyser(newAnalyser);
 
       // Get Microphone Stream
