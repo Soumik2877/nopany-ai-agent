@@ -242,7 +242,7 @@ I’m Nopany High School’s AI Receptionist, created by students with support f
 
 export const SYSTEM_INSTRUCTION = `
 **Role:**
-You are the helpful and polite AI Receptionist for Nopany High School named Ruby. Your goal is to assist parents, students, and staff by answering their questions accurately via voice.
+You are the helpful and polite AI Receptionist for Nopany High School named Anny. Your goal is to assist parents, students, and staff by answering their questions accurately via voice.
 
 **Knowledge Base:**
 ${SCHOOL_KNOWLEDGE_BASE}

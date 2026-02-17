@@ -1,7 +1,11 @@
-import { useState, useRef, useCallback } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
-import { SYSTEM_INSTRUCTION } from '../utils/schoolData';
-import { createPcmBlob, base64ToArrayBuffer, decodeAudioData } from '../utils/audioUtils';
+import { useState, useRef, useCallback } from "react";
+import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
+import { SYSTEM_INSTRUCTION } from "../utils/schoolData";
+import {
+  createPcmBlob,
+  base64ToArrayBuffer,
+  decodeAudioData,
+} from "../utils/audioUtils";
 
 interface UseLiveAPIOptions {
   onModelText?: (text: string) => void;
@@ -34,17 +38,17 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
   const disconnect = useCallback(() => {
     // 1. Close session
     if (sessionRef.current) {
-       // There is no explicit .close() in the JS SDK generic session object usually exposed, 
-       // but typically we just stop sending data and let it timeout or if the SDK provides a close method.
-       // The example mentions onclose callback but not explicit close method on session object in the snippet.
-       // We can assume dropping the reference and stopping streams is enough or if the specific SDK version has .close()
-       // For safety, we just clean up local resources.
-       sessionRef.current = null;
+      // There is no explicit .close() in the JS SDK generic session object usually exposed,
+      // but typically we just stop sending data and let it timeout or if the SDK provides a close method.
+      // The example mentions onclose callback but not explicit close method on session object in the snippet.
+      // We can assume dropping the reference and stopping streams is enough or if the specific SDK version has .close()
+      // For safety, we just clean up local resources.
+      sessionRef.current = null;
     }
 
     // 2. Stop audio tracks
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
 
@@ -69,7 +73,7 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
     }
 
     // 5. Clear audio queue
-    audioQueueRef.current.forEach(source => source.stop());
+    audioQueueRef.current.forEach((source) => source.stop());
     audioQueueRef.current.clear();
 
     setIsConnected(false);
@@ -91,15 +95,17 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
       const ai = new GoogleGenAI({ apiKey });
 
       // Setup Audio Contexts
-      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      
+      const inputCtx = new (window.AudioContext ||
+        (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      const outputCtx = new (window.AudioContext ||
+        (window as any).webkitAudioContext)({ sampleRate: 24000 });
+
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
 
       // Setup Visualizer Analyser
       const newAnalyser = outputCtx.createAnalyser();
-      newAnalyser.fftSize = 128; // Smaller FFT size for smoother visuals
+      newAnalyser.fftSize = 32; // Smaller FFT size for smoother visuals
       setAnalyser(newAnalyser);
 
       // Get Microphone Stream
@@ -108,12 +114,12 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
 
       // Connect to Gemini Live
       const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+        model: "gemini-2.5-flash-native-audio-preview-12-2025",
         config: {
           responseModalities: [Modality.AUDIO],
           systemInstruction: SYSTEM_INSTRUCTION,
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }, // Professional tone
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } }, // Professional tone
           },
         },
         callbacks: {
@@ -125,19 +131,22 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
             // Start processing microphone input
             const source = inputCtx.createMediaStreamSource(stream);
             sourceRef.current = source;
-            
+
             // Use ScriptProcessor (as per guidelines example)
             const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
             processorRef.current = scriptProcessor;
 
             scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
-              const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+              const inputData =
+                audioProcessingEvent.inputBuffer.getChannelData(0);
               const pcmBlob = createPcmBlob(inputData);
-              
+
               // Send to model
-              sessionPromise.then((session) => {
-                session.sendRealtimeInput({ media: pcmBlob });
-              }).catch(err => console.error("Session send error", err));
+              sessionPromise
+                .then((session) => {
+                  session.sendRealtimeInput({ media: pcmBlob });
+                })
+                .catch((err) => console.error("Session send error", err));
             };
 
             source.connect(scriptProcessor);
@@ -145,33 +154,63 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
           },
           onmessage: async (message: LiveServerMessage) => {
             // Handle Audio Output
-            const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            const base64Audio =
+              message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio) {
               const ctx = outputAudioContextRef.current;
               if (!ctx) return;
 
               // Ensure timing
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+              nextStartTimeRef.current = Math.max(
+                nextStartTimeRef.current,
+                ctx.currentTime
+              );
 
               try {
                 const arrayBuffer = base64ToArrayBuffer(base64Audio);
-                const audioBuffer = await decodeAudioData(arrayBuffer, ctx, 24000, 1);
-                
+                const audioBuffer = await decodeAudioData(
+                  arrayBuffer,
+                  ctx,
+                  24000,
+                  1
+                );
+
+                // 2. JITTER BUFFER LOGIC
+                // Calculate where we are in the timeline
+                const currentTime = ctx.currentTime;
+
+                // If our "next start time" is in the past (or we just started),
+                // it means we ran out of audio (underrun).
+                // We must reset the timeline and add a small safety buffer (e.g., 150ms).
+                if (nextStartTimeRef.current < currentTime) {
+                  // "0.15" is 150ms. Increase to 0.2 or 0.3 if stuttering persists.
+                  nextStartTimeRef.current = currentTime + 0.15;
+                }
                 const source = ctx.createBufferSource();
                 source.buffer = audioBuffer;
-                
+
                 // Connect to analyser for visualization, then to destination
                 source.connect(newAnalyser);
                 newAnalyser.connect(ctx.destination);
 
-                source.addEventListener('ended', () => {
-                   audioQueueRef.current.delete(source);
-                });
+                // source.addEventListener("ended", () => {
+                //   audioQueueRef.current.delete(source);
+                // });
+
+                // source.start(nextStartTimeRef.current);
+                // nextStartTimeRef.current += audioBuffer.duration;
+                // audioQueueRef.current.add(source);
 
                 source.start(nextStartTimeRef.current);
-                nextStartTimeRef.current += audioBuffer.duration;
-                audioQueueRef.current.add(source);
 
+                // 4. Advance the timeline cursor
+                nextStartTimeRef.current += audioBuffer.duration;
+
+                // Cleanup helper
+                source.onended = () => {
+                  audioQueueRef.current.delete(source);
+                };
+                audioQueueRef.current.add(source);
               } catch (decodeErr) {
                 console.error("Audio decode error:", decodeErr);
               }
@@ -181,8 +220,8 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
             const parts = message.serverContent?.modelTurn?.parts;
             if (parts && options?.onModelText) {
               const combinedText = parts
-                .map((p: any) => (typeof p.text === 'string' ? p.text : ''))
-                .join(' ')
+                .map((p: any) => (typeof p.text === "string" ? p.text : ""))
+                .join(" ")
                 .trim();
               if (combinedText) {
                 options.onModelText(combinedText);
@@ -192,8 +231,10 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
             // Handle Interruption
             if (message.serverContent?.interrupted) {
               console.log("Model interrupted");
-              audioQueueRef.current.forEach(source => {
-                try { source.stop(); } catch(e){}
+              audioQueueRef.current.forEach((source) => {
+                try {
+                  source.stop();
+                } catch (e) {}
               });
               audioQueueRef.current.clear();
               nextStartTimeRef.current = 0; // Reset timing
@@ -207,12 +248,11 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
             console.error("Gemini Live API Error", e);
             setError("Connection error occurred.");
             disconnect();
-          }
-        }
+          },
+        },
       });
-      
-      sessionRef.current = sessionPromise;
 
+      sessionRef.current = sessionPromise;
     } catch (err: any) {
       console.error("Connection failed:", err);
       setError(err.message || "Failed to connect");
@@ -227,6 +267,6 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
     isConnected,
     isConnecting,
     error,
-    analyser
+    analyser,
   };
 };
