@@ -183,8 +183,8 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
                 // it means we ran out of audio (underrun).
                 // We must reset the timeline and add a small safety buffer (e.g., 150ms).
                 if (nextStartTimeRef.current < currentTime) {
-                  // "0.15" is 150ms. Increase to 0.2 or 0.3 if stuttering persists.
-                  nextStartTimeRef.current = currentTime + 0.15;
+                  // "0.5" is 500ms. Increased from 0.15s to 0.5s to prevent stuttering on Raspberry Pi.
+                  nextStartTimeRef.current = currentTime + 0.5;
                 }
                 const source = ctx.createBufferSource();
                 source.buffer = audioBuffer;

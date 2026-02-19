@@ -59,10 +59,10 @@
 //         gradient.addColorStop(1, '#818CF8'); // Lighter shade
 
 //         ctx.fillStyle = gradient;
-        
+
 //         // Center the bars vertically
 //         const y = (rect.height - barHeight) / 2;
-        
+
 //         // Rounded bars
 //         ctx.beginPath();
 //         ctx.roundRect(x, y, barWidth, barHeight, 2);
@@ -134,8 +134,8 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ analyser, isActive, b
     const draw = (timestamp: number) => {
       requestRef.current = requestAnimationFrame(draw);
 
-      // Throttling: Only draw every ~33ms (30 FPS) to save CPU for Audio
-      if (timestamp - lastDrawTimeRef.current < 33) return;
+      // Throttling: Only draw every ~50ms (20 FPS) to save CPU for Audio on Pi
+      if (timestamp - lastDrawTimeRef.current < 50) return;
       lastDrawTimeRef.current = timestamp;
 
       if (!isActive || !analyser) {
@@ -151,14 +151,14 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ analyser, isActive, b
       ctx.fillRect(0, 0, rect.width, rect.height);
 
       // Wider bars = fewer bars to draw = faster
-      const barWidth = (rect.width / bufferLength) * 2.5; 
+      const barWidth = (rect.width / bufferLength) * 2.5;
       let x = 0;
 
       ctx.fillStyle = barColor; // Optimization: Solid color instead of Gradient
 
       for (let i = 0; i < bufferLength; i++) {
         const barHeight = (dataArray[i] / 255) * rect.height;
-        
+
         // Simple rectangle is much faster than roundRect or gradients
         ctx.fillRect(x, (rect.height - barHeight) / 2, barWidth, barHeight);
 
@@ -169,10 +169,10 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ analyser, isActive, b
     if (isActive) {
       requestRef.current = requestAnimationFrame(draw);
     } else {
-        // Idle state
-        ctx.fillStyle = '#f8fafc';
-        ctx.fillRect(0, 0, rect.width, rect.height);
-        if (requestRef.current) cancelAnimationFrame(requestRef.current);
+      // Idle state
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillRect(0, 0, rect.width, rect.height);
+      if (requestRef.current) cancelAnimationFrame(requestRef.current);
     }
 
     return () => {
