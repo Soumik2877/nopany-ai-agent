@@ -21,16 +21,23 @@ const App: React.FC = () => {
   // ── Transcript helpers ─────────────────────────────────────────────
 
   const upsertTranscript = useCallback((role: 'user' | 'agent', text: string, isFinal: boolean) => {
-    // Gemini sends transcription as incremental delta chunks, not accumulated text.
-    // Ignore empty chunks to avoid overwriting good text with blanks.
-    if (!text) return;
     setTranscript(prev => {
       const last = prev[prev.length - 1];
-      // Append the new chunk to the existing pending entry for this role
-      if (last && last.role === role && last.pending) {
-        return [...prev.slice(0, -1), { ...last, text: last.text + text, pending: !isFinal }];
+
+      // '\x00' sentinel = remove the last pending placeholder (noise/error cleanup)
+      if (text === '\x00') {
+        if (last && last.role === role && last.pending) return prev.slice(0, -1);
+        return prev;
       }
-      // No open pending entry — start a fresh one
+
+      if (last && last.role === role && last.pending) {
+        // If the existing entry is a placeholder ('…'), replace it; otherwise append
+        const merged = last.text === '…' ? text : last.text + text;
+        return [...prev.slice(0, -1), { ...last, text: merged, pending: !isFinal }];
+      }
+
+      // No open pending entry for this role — skip empty text
+      if (!text) return prev;
       return [...prev, { id: `${role}-${Date.now()}`, role, text, pending: !isFinal }];
     });
   }, []);

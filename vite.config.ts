@@ -16,6 +16,7 @@ export default defineConfig(({ mode }) => {
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
         'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        'process.env.GROQ_API_KEY': JSON.stringify(env.GROQ_API_KEY),
         'import.meta.env.HAND_API_BASE_URL': JSON.stringify(env.HAND_API_BASE_URL || 'http://localhost:8000'),
       },
       resolve: {

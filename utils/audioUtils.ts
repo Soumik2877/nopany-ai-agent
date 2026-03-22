@@ -66,3 +66,48 @@ export function createPcmBlob(data: Float32Array): Blob {
     mimeType: 'audio/pcm;rate=16000',
   };
 }
+
+// ── WAV encoding ──────────────────────────────────────────────────────────────
+
+/**
+ * Encodes a Float32Array of mono PCM samples into a standard 16-bit WAV
+ * ArrayBuffer that can be sent to the Groq Whisper API as an audio file.
+ */
+export function float32ToWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const numChannels  = 1;
+  const bitDepth     = 16;
+  const bytesPerSamp = bitDepth / 8;
+  const blockAlign   = numChannels * bytesPerSamp;
+  const dataSize     = samples.length * bytesPerSamp;
+  const buf          = new ArrayBuffer(44 + dataSize);
+  const view         = new DataView(buf);
+
+  const wstr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+
+  // RIFF / WAVE / fmt  chunk
+  wstr(0,  'RIFF');
+  view.setUint32( 4, 36 + dataSize, true);
+  wstr(8,  'WAVE');
+  wstr(12, 'fmt ');
+  view.setUint32(16, 16,          true); // PCM sub-chunk size
+  view.setUint16(20, 1,           true); // PCM format
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate,  true);
+  view.setUint32(28, sampleRate * blockAlign, true); // byte rate
+  view.setUint16(32, blockAlign,  true);
+  view.setUint16(34, bitDepth,    true);
+
+  // data chunk
+  wstr(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  // Float32 → Int16 PCM
+  const int16 = new Int16Array(buf, 44);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return buf;
+}

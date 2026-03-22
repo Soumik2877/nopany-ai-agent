@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { SYSTEM_INSTRUCTION } from '../utils/schoolData';
-import { createPcmBlob, base64ToArrayBuffer, decodeAudioDataSync } from '../utils/audioUtils';
+import { base64ToArrayBuffer, decodeAudioDataSync, float32ToWav } from '../utils/audioUtils';
 
 export interface UseLiveAPIOptions {
   /** Fires with AI response text parts (for eye/hand keyword matching). */
@@ -40,10 +40,10 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
   const inputAudioContextRef  = useRef<AudioContext | null>(null);
   const outputAudioContextRef = useRef<AudioContext | null>(null);
 
-  // Resolved session (not a Promise) so onaudioprocess never calls .then()
+  // Resolved session (not a Promise) so the worklet port handler never calls .then()
   const sessionRef   = useRef<any>(null);
   const streamRef    = useRef<MediaStream | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const processorRef = useRef<AudioWorkletNode | null>(null);
   const sourceRef    = useRef<MediaStreamAudioSourceNode | null>(null);
 
   const nextStartTimeRef   = useRef<number>(0);
@@ -58,11 +58,10 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
     isDisconnectingRef.current = true;
     setIsDisconnecting(true);
 
-    // Null the session immediately so onaudioprocess stops sending even if
-    // the ScriptProcessor fires one last time before the context fully closes.
+    // Null the session immediately so the worklet port handler stops sending
     sessionRef.current = null;
 
-    // Stop mic tracks first — prevents further onaudioprocess callbacks
+    // Stop mic tracks first — prevents further worklet callbacks
     streamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null;
 
@@ -126,6 +125,87 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
       if (inputCtx.state  === 'suspended') await inputCtx.resume();
       if (outputCtx.state === 'suspended') await outputCtx.resume();
 
+      // ── Load AudioWorklet VAD processor ─────────────────────────────────────
+      // This worklet runs on the audio rendering thread (off main thread) and
+      // performs amplitude-based Voice Activity Detection.  When it detects a
+      // complete speech segment it emits the raw Float32Array via postMessage —
+      // we then encode it as WAV and transcribe with Groq Whisper-large-v3.
+      // Gemini receives the *text* transcript, not raw audio.
+      const WORKLET_CODE = `
+        class VadCaptureProcessor extends AudioWorkletProcessor {
+          constructor() {
+            super();
+            this._threshold  = 0.012;  // RMS energy level above which we consider speech
+            this._prePad     = 15;     // frames to keep before speech onset (~120ms)
+            this._endPad     = 45;     // silent frames before committing utterance (~360ms)
+            this._minFrames  = 10;     // minimum speech frames — avoids noise blips (~80ms)
+            this._preBuffer  = [];     // rolling window of frames before speech
+            this._speech     = [];     // frames accumulated during speech
+            this._speaking   = false;
+            this._silFrames  = 0;
+            this._speechFrames = 0;
+          }
+
+          _rms(ch) {
+            let s = 0;
+            for (let i = 0; i < ch.length; i++) s += ch[i] * ch[i];
+            return Math.sqrt(s / ch.length);
+          }
+
+          process(inputs) {
+            const ch = inputs[0]?.[0];
+            if (!ch) return true;
+
+            const rms   = this._rms(ch);
+            const frame = ch.slice(); // copy — the engine reuses the underlying buffer
+
+            if (!this._speaking) {
+              // Maintain a rolling pre-speech buffer for prefix padding
+              this._preBuffer.push(frame);
+              if (this._preBuffer.length > this._prePad) this._preBuffer.shift();
+
+              if (rms > this._threshold) {
+                this._speaking     = true;
+                this._silFrames    = 0;
+                this._speechFrames = 0;
+                // Include pre-buffer so we don't clip the first phoneme
+                this._speech = [...this._preBuffer, frame];
+              }
+            } else {
+              this._speech.push(frame);
+              this._speechFrames++;
+
+              if (rms < this._threshold) {
+                this._silFrames++;
+                if (this._silFrames >= this._endPad) {
+                  if (this._speechFrames >= this._minFrames) {
+                    // Flatten all frames into one Float32Array and transfer ownership
+                    const total = this._speech.reduce((s, c) => s + c.length, 0);
+                    const out   = new Float32Array(total);
+                    let off = 0;
+                    for (const c of this._speech) { out.set(c, off); off += c.length; }
+                    this.port.postMessage(out, [out.buffer]);
+                  }
+                  this._speaking     = false;
+                  this._silFrames    = 0;
+                  this._speechFrames = 0;
+                  this._speech       = [];
+                  this._preBuffer    = [];
+                }
+              } else {
+                this._silFrames = 0;
+              }
+            }
+            return true;
+          }
+        }
+        registerProcessor('vad-capture', VadCaptureProcessor);
+      `;
+      const workletBlob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
+      const workletUrl  = URL.createObjectURL(workletBlob);
+      await inputCtx.audioWorklet.addModule(workletUrl);
+      URL.revokeObjectURL(workletUrl);
+
       const newAnalyser = outputCtx.createAnalyser();
       newAnalyser.fftSize = 32;
       setAnalyser(newAnalyser);
@@ -144,39 +224,22 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
-          // Audio-only response — no TEXT modality overhead
+          // Gemini receives TEXT from Groq Whisper and replies with AUDIO.
+          // All user-side VAD and STT is now handled client-side via Groq.
           responseModalities: [Modality.AUDIO],
           systemInstruction: SYSTEM_INSTRUCTION,
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
-          // Transcription of user speech and agent speech for the chat log.
-          // These use a lightweight STT pass, NOT text generation, so they
-          // do NOT add response latency.
-          inputAudioTranscription:  {} as any,
+          // Agent speech transcription for the chat log (lightweight STT pass,
+          // does NOT add latency to Gemini's response generation).
           outputAudioTranscription: {} as any,
-          // ── Voice-activity detection ─────────────────────────────────────────
-          // Default silenceDurationMs is ~2 000 ms which is the main cause of
-          // 10–30 s response latency.  Setting it to 500 ms means the model
-          // fires within ~0.5 s of the user stopping speech.
-          realtimeInputConfig: {
-            automaticActivityDetection: {
-              disabled: false,
-              // Detect end of speech quickly after short silence
-              endOfSpeechSensitivity:   'END_SENSITIVITY_HIGH'   as any,
-              // Detect start of speech immediately
-              startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH' as any,
-              // Include 200 ms of audio before speech starts (avoids clipping first word)
-              prefixPaddingMs:  200,
-              // Commit user turn after 500 ms of silence
-              silenceDurationMs: 500,
-            },
-          } as any,
+          // No realtimeInputConfig — we send text, not audio, to Gemini.
         },
 
         callbacks: {
           onopen: () => {
-            // Cache the real session object once — hot audio path uses ref directly
+            // Cache the real session object once — hot path uses ref directly
             sessionPromise.then(s => { sessionRef.current = s; });
 
             setIsConnected(true);
@@ -185,23 +248,73 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
             const source      = inputCtx.createMediaStreamSource(stream);
             sourceRef.current = source;
 
-            // 2048 samples @ 16 kHz = 128 ms per chunk (vs 256 ms at 4096)
-            // Lower buffer = less input lag, still stable on Pi
-            const proc = inputCtx.createScriptProcessor(2048, 1, 1);
-            processorRef.current = proc;
+            // VAD AudioWorkletNode — runs off the main thread
+            const workletNode = new AudioWorkletNode(inputCtx, 'vad-capture');
+            processorRef.current = workletNode;
 
-            proc.onaudioprocess = (e) => {
+            // ── Groq Whisper transcription ──────────────────────────────────
+            // Called whenever the VAD emits a completed speech segment.
+            // The whole pipeline: Float32 PCM → WAV → Groq API → transcript
+            // text → Gemini sendClientContent (text turn).
+            const GROQ_KEY = process.env.GROQ_API_KEY;
+
+            workletNode.port.onmessage = async (e: MessageEvent<Float32Array>) => {
               const session = sessionRef.current;
-              if (!session) return;
+              if (!session || !GROQ_KEY) return;
+
+              const samples = e.data;
+
+              // Show a pending bubble so the user knows their speech was captured
+              callbacksRef.current?.onUserTranscript?.('…', false);
+
               try {
-                session.sendRealtimeInput({
-                  media: createPcmBlob(e.inputBuffer.getChannelData(0)),
+                const wav      = float32ToWav(samples, 16000);
+                const formData = new FormData();
+                formData.append(
+                  'file',
+                  new Blob([wav], { type: 'audio/wav' }),
+                  'audio.wav',
+                );
+                formData.append('model', 'whisper-large-v3');
+                formData.append('response_format', 'json');
+
+                const res = await fetch(
+                  'https://api.groq.com/openai/v1/audio/transcriptions',
+                  {
+                    method:  'POST',
+                    headers: { Authorization: `Bearer ${GROQ_KEY}` },
+                    body:    formData,
+                  },
+                );
+
+                if (!res.ok) throw new Error(`Groq ${res.status}`);
+                const { text } = await res.json() as { text?: string };
+                const transcript = (text ?? '').trim();
+
+                if (!transcript) {
+                  // Noise / silence — remove the pending placeholder bubble
+                  callbacksRef.current?.onUserTranscript?.('\x00', true);
+                  return;
+                }
+
+                // Replace the '…' bubble with the real transcript
+                callbacksRef.current?.onUserTranscript?.(transcript, true);
+
+                // Send the transcript text to Gemini as the user's turn
+                (session as any).sendClientContent({
+                  turns: [{ role: 'user', parts: [{ text: transcript }] }],
+                  turnComplete: true,
                 });
-              } catch (_) {}
+              } catch (err) {
+                console.error('Groq STT error:', err);
+                // Remove the pending placeholder on failure
+                callbacksRef.current?.onUserTranscript?.('\x00', true);
+              }
             };
 
-            source.connect(proc);
-            proc.connect(inputCtx.destination);
+            // mic → worklet (VAD + capture) → silent destination
+            source.connect(workletNode);
+            workletNode.connect(inputCtx.destination);
           },
 
           // ── Fully synchronous message handler — no async, no await ───────────
