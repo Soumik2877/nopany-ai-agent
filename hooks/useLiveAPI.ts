@@ -1,14 +1,19 @@
-import { useState, useRef, useCallback } from "react";
-import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
-import { SYSTEM_INSTRUCTION } from "../utils/schoolData";
-import {
-  createPcmBlob,
-  base64ToArrayBuffer,
-  decodeAudioData,
-} from "../utils/audioUtils";
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
+import { SYSTEM_INSTRUCTION } from '../utils/schoolData';
+import { createPcmBlob, base64ToArrayBuffer, decodeAudioDataSync } from '../utils/audioUtils';
 
-interface UseLiveAPIOptions {
+export interface UseLiveAPIOptions {
+  /** Fires with AI response text parts (for eye/hand keyword matching). */
   onModelText?: (text: string) => void;
+  /** Fires once at the START of each AI speaking turn (first audio chunk). */
+  onModelSpeaking?: () => void;
+  /** Fires once at the END of each AI speaking turn (turnComplete / interruption). */
+  onModelDoneSpeaking?: () => void;
+  /** Fires with user speech transcription chunks. isFinal=true means the utterance is complete. */
+  onUserTranscript?: (text: string, isFinal: boolean) => void;
+  /** Fires with agent speech transcription chunks. isFinal=true means the turn is complete. */
+  onAgentTranscript?: (text: string, isFinal: boolean) => void;
 }
 
 interface UseLiveAPIResult {
@@ -16,69 +21,81 @@ interface UseLiveAPIResult {
   disconnect: () => void;
   isConnected: boolean;
   isConnecting: boolean;
+  isDisconnecting: boolean;
   error: string | null;
-  analyser: AnalyserNode | null; // For visualization
+  analyser: AnalyserNode | null;
 }
 
 export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
-  const [isConnected, setIsConnected] = useState(false);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
+  const [isConnected,    setIsConnected]    = useState(false);
+  const [isConnecting,   setIsConnecting]   = useState(false);
+  const [isDisconnecting, setIsDisconnecting] = useState(false);
+  const [error,          setError]          = useState<string | null>(null);
+  const [analyser,       setAnalyser]       = useState<AnalyserNode | null>(null);
 
-  const inputAudioContextRef = useRef<AudioContext | null>(null);
+  // Always holds the latest callbacks — avoids stale-closure bugs
+  const callbacksRef = useRef<UseLiveAPIOptions | undefined>(options);
+  useEffect(() => { callbacksRef.current = options; });
+
+  const inputAudioContextRef  = useRef<AudioContext | null>(null);
   const outputAudioContextRef = useRef<AudioContext | null>(null);
-  const sessionRef = useRef<any>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+
+  // Resolved session (not a Promise) so onaudioprocess never calls .then()
+  const sessionRef   = useRef<any>(null);
+  const streamRef    = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const nextStartTimeRef = useRef<number>(0);
-  const audioQueueRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const sourceRef    = useRef<MediaStreamAudioSourceNode | null>(null);
+
+  const nextStartTimeRef   = useRef<number>(0);
+  const audioQueueRef      = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const isModelSpeakingRef = useRef(false);
+  // Guards against re-entrant disconnect calls (e.g. button click + onclose firing together)
+  const isDisconnectingRef = useRef(false);
 
   const disconnect = useCallback(() => {
-    // 1. Close session
-    if (sessionRef.current) {
-      // There is no explicit .close() in the JS SDK generic session object usually exposed,
-      // but typically we just stop sending data and let it timeout or if the SDK provides a close method.
-      // The example mentions onclose callback but not explicit close method on session object in the snippet.
-      // We can assume dropping the reference and stopping streams is enough or if the specific SDK version has .close()
-      // For safety, we just clean up local resources.
-      sessionRef.current = null;
-    }
+    // Prevent re-entrant / duplicate teardown
+    if (isDisconnectingRef.current) return;
+    isDisconnectingRef.current = true;
+    setIsDisconnecting(true);
 
-    // 2. Stop audio tracks
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
+    // Null the session immediately so onaudioprocess stops sending even if
+    // the ScriptProcessor fires one last time before the context fully closes.
+    sessionRef.current = null;
 
-    // 3. Close audio contexts
-    if (inputAudioContextRef.current) {
-      inputAudioContextRef.current.close();
-      inputAudioContextRef.current = null;
-    }
-    if (outputAudioContextRef.current) {
-      outputAudioContextRef.current.close();
-      outputAudioContextRef.current = null;
-    }
+    // Stop mic tracks first — prevents further onaudioprocess callbacks
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
 
-    // 4. Disconnect nodes
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
-    if (sourceRef.current) {
-      sourceRef.current.disconnect();
-      sourceRef.current = null;
-    }
+    // Disconnect graph nodes before closing contexts
+    processorRef.current?.disconnect();
+    processorRef.current = null;
 
-    // 5. Clear audio queue
-    audioQueueRef.current.forEach((source) => source.stop());
+    sourceRef.current?.disconnect();
+    sourceRef.current = null;
+
+    // Close audio contexts (async internally, but we don't need to await)
+    inputAudioContextRef.current?.close();
+    inputAudioContextRef.current = null;
+
+    outputAudioContextRef.current?.close();
+    outputAudioContextRef.current = null;
+
+    // Stop any queued audio buffers
+    audioQueueRef.current.forEach(s => { try { s.stop(); } catch (_) {} });
     audioQueueRef.current.clear();
+    nextStartTimeRef.current = 0;
+
+    if (isModelSpeakingRef.current) {
+      isModelSpeakingRef.current = false;
+      callbacksRef.current?.onModelDoneSpeaking?.();
+    }
 
     setIsConnected(false);
     setIsConnecting(false);
+    setIsDisconnecting(false);
     setAnalyser(null);
+
+    isDisconnectingRef.current = false;
   }, []);
 
   const connect = useCallback(async () => {
@@ -88,185 +105,207 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
 
     try {
       const apiKey = process.env.API_KEY;
-      if (!apiKey) {
-        throw new Error("API Key not found in environment variables");
-      }
+      if (!apiKey) throw new Error('API Key not found in environment variables');
 
       const ai = new GoogleGenAI({ apiKey });
 
-      // Setup Audio Contexts
-      const inputCtx = new (window.AudioContext ||
-        (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const outputCtx = new (window.AudioContext ||
-        (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      // Input at 16 kHz mono — matches what Gemini expects
+      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({
+        sampleRate: 16000,
+        latencyHint: 'interactive',
+      });
+      // Output at 24 kHz — matches Gemini's PCM output rate
+      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({
+        sampleRate: 24000,
+        latencyHint: 'playback',
+      });
 
-      inputAudioContextRef.current = inputCtx;
+      inputAudioContextRef.current  = inputCtx;
       outputAudioContextRef.current = outputCtx;
 
-      // Setup Visualizer Analyser
+      if (inputCtx.state  === 'suspended') await inputCtx.resume();
+      if (outputCtx.state === 'suspended') await outputCtx.resume();
+
       const newAnalyser = outputCtx.createAnalyser();
-      newAnalyser.fftSize = 32; // Smaller FFT size for smoother visuals
+      newAnalyser.fftSize = 32;
       setAnalyser(newAnalyser);
 
-      // Get Microphone Stream
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Explicit mono + standard processing helps VAD work cleanly
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount:     1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl:  true,
+        },
+      });
       streamRef.current = stream;
 
-      // Connect to Gemini Live
       const sessionPromise = ai.live.connect({
-        model: "gemini-2.5-flash-native-audio-preview-12-2025",
+        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
+          // Audio-only response — no TEXT modality overhead
           responseModalities: [Modality.AUDIO],
           systemInstruction: SYSTEM_INSTRUCTION,
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } }, // Professional tone
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
+          // Transcription of user speech and agent speech for the chat log.
+          // These use a lightweight STT pass, NOT text generation, so they
+          // do NOT add response latency.
+          inputAudioTranscription:  {} as any,
+          outputAudioTranscription: {} as any,
+          // ── Voice-activity detection ─────────────────────────────────────────
+          // Default silenceDurationMs is ~2 000 ms which is the main cause of
+          // 10–30 s response latency.  Setting it to 500 ms means the model
+          // fires within ~0.5 s of the user stopping speech.
+          realtimeInputConfig: {
+            automaticActivityDetection: {
+              disabled: false,
+              // Detect end of speech quickly after short silence
+              endOfSpeechSensitivity:   'END_SENSITIVITY_HIGH'   as any,
+              // Detect start of speech immediately
+              startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH' as any,
+              // Include 200 ms of audio before speech starts (avoids clipping first word)
+              prefixPaddingMs:  200,
+              // Commit user turn after 500 ms of silence
+              silenceDurationMs: 500,
+            },
+          } as any,
         },
+
         callbacks: {
           onopen: () => {
-            console.log("Gemini Live Session Opened");
+            // Cache the real session object once — hot audio path uses ref directly
+            sessionPromise.then(s => { sessionRef.current = s; });
+
             setIsConnected(true);
             setIsConnecting(false);
 
-            // Start processing microphone input
-            const source = inputCtx.createMediaStreamSource(stream);
+            const source      = inputCtx.createMediaStreamSource(stream);
             sourceRef.current = source;
 
-            // Use ScriptProcessor (as per guidelines example)
-            const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
-            processorRef.current = scriptProcessor;
+            // 2048 samples @ 16 kHz = 128 ms per chunk (vs 256 ms at 4096)
+            // Lower buffer = less input lag, still stable on Pi
+            const proc = inputCtx.createScriptProcessor(2048, 1, 1);
+            processorRef.current = proc;
 
-            scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
-              const inputData =
-                audioProcessingEvent.inputBuffer.getChannelData(0);
-              const pcmBlob = createPcmBlob(inputData);
-
-              // Send to model
-              sessionPromise
-                .then((session) => {
-                  session.sendRealtimeInput({ media: pcmBlob });
-                })
-                .catch((err) => console.error("Session send error", err));
+            proc.onaudioprocess = (e) => {
+              const session = sessionRef.current;
+              if (!session) return;
+              try {
+                session.sendRealtimeInput({
+                  media: createPcmBlob(e.inputBuffer.getChannelData(0)),
+                });
+              } catch (_) {}
             };
 
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(inputCtx.destination); // Mute locally, but needed for processing
+            source.connect(proc);
+            proc.connect(inputCtx.destination);
           },
-          onmessage: async (message: LiveServerMessage) => {
-            // Handle Audio Output
+
+          // ── Fully synchronous message handler — no async, no await ───────────
+          // Using sync audio decode means chunks are always scheduled in the
+          // order they arrive; no two chunks can race on nextStartTimeRef.
+          onmessage: (message: LiveServerMessage) => {
+            const ctx = outputAudioContextRef.current;
+
+            // ── Audio output ──────────────────────────────────────────────────
             const base64Audio =
               message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            if (base64Audio) {
-              const ctx = outputAudioContextRef.current;
-              if (!ctx) return;
 
-              // Ensure timing
-              nextStartTimeRef.current = Math.max(
-                nextStartTimeRef.current,
-                ctx.currentTime
-              );
+            if (base64Audio && ctx) {
+              // Fire speaking signal once per turn
+              if (!isModelSpeakingRef.current) {
+                isModelSpeakingRef.current = true;
+                callbacksRef.current?.onModelSpeaking?.();
+              }
+
+              // Resume context if suspended (tab backgrounded) — fire-and-forget
+              if (ctx.state === 'suspended') ctx.resume();
+
+              // Jitter buffer: schedule at "now + small safety pad" when there is
+              // no existing queued audio (first chunk of a turn or after underrun).
+              if (nextStartTimeRef.current <= ctx.currentTime) {
+                nextStartTimeRef.current = ctx.currentTime + 0.04; // 40 ms pad
+              }
 
               try {
                 const arrayBuffer = base64ToArrayBuffer(base64Audio);
-                const audioBuffer = await decodeAudioData(
-                  arrayBuffer,
-                  ctx,
-                  24000,
-                  1
-                );
+                const audioBuffer = decodeAudioDataSync(arrayBuffer, ctx, 24000, 1);
 
-                // 2. JITTER BUFFER LOGIC
-                // Calculate where we are in the timeline
-                const currentTime = ctx.currentTime;
-
-                // If our "next start time" is in the past (or we just started),
-                // it means we ran out of audio (underrun).
-                // We must reset the timeline and add a small safety buffer (e.g., 150ms).
-                if (nextStartTimeRef.current < currentTime) {
-                  // "0.5" is 500ms. Increased from 0.15s to 0.5s to prevent stuttering on Raspberry Pi.
-                  nextStartTimeRef.current = currentTime + 0.5;
-                }
-                const source = ctx.createBufferSource();
-                source.buffer = audioBuffer;
-
-                // Connect to analyser for visualization, then to destination
-                source.connect(newAnalyser);
+                const src = ctx.createBufferSource();
+                src.buffer = audioBuffer;
+                src.connect(newAnalyser);
                 newAnalyser.connect(ctx.destination);
-
-                // source.addEventListener("ended", () => {
-                //   audioQueueRef.current.delete(source);
-                // });
-
-                // source.start(nextStartTimeRef.current);
-                // nextStartTimeRef.current += audioBuffer.duration;
-                // audioQueueRef.current.add(source);
-
-                source.start(nextStartTimeRef.current);
-
-                // 4. Advance the timeline cursor
+                src.onended = () => audioQueueRef.current.delete(src);
+                src.start(nextStartTimeRef.current);
                 nextStartTimeRef.current += audioBuffer.duration;
-
-                // Cleanup helper
-                source.onended = () => {
-                  audioQueueRef.current.delete(source);
-                };
-                audioQueueRef.current.add(source);
-              } catch (decodeErr) {
-                console.error("Audio decode error:", decodeErr);
+                audioQueueRef.current.add(src);
+              } catch (e) {
+                console.error('Audio schedule error:', e);
               }
             }
 
-            // Handle text output (if provided) so the agent can trigger actions.
+            // ── Text parts → hand / eye keyword actions ───────────────────────
             const parts = message.serverContent?.modelTurn?.parts;
-            if (parts && options?.onModelText) {
-              const combinedText = parts
-                .map((p: any) => (typeof p.text === "string" ? p.text : ""))
-                .join(" ")
+            if (parts) {
+              const text = parts
+                .map((p: any) => (typeof p.text === 'string' ? p.text : ''))
+                .join(' ')
                 .trim();
-              if (combinedText) {
-                options.onModelText(combinedText);
+              if (text) callbacksRef.current?.onModelText?.(text);
+            }
+
+            // ── User speech transcription ─────────────────────────────────────
+            const inputTx = (message as any).serverContent?.inputTranscription;
+            if (inputTx?.text !== undefined) {
+              callbacksRef.current?.onUserTranscript?.(inputTx.text, inputTx.final ?? false);
+            }
+
+            // ── Agent speech transcription ────────────────────────────────────
+            const outputTx = (message as any).serverContent?.outputTranscription;
+            if (outputTx?.text !== undefined) {
+              callbacksRef.current?.onAgentTranscript?.(outputTx.text, outputTx.final ?? false);
+            }
+
+            // ── Turn complete ─────────────────────────────────────────────────
+            if (message.serverContent?.turnComplete) {
+              if (isModelSpeakingRef.current) {
+                isModelSpeakingRef.current = false;
+                callbacksRef.current?.onModelDoneSpeaking?.();
               }
             }
 
-            // Handle Interruption
+            // ── Interruption (user spoke over the agent) ──────────────────────
             if (message.serverContent?.interrupted) {
-              console.log("Model interrupted");
-              audioQueueRef.current.forEach((source) => {
-                try {
-                  source.stop();
-                } catch (e) {}
-              });
+              audioQueueRef.current.forEach(s => { try { s.stop(); } catch (_) {} });
               audioQueueRef.current.clear();
-              nextStartTimeRef.current = 0; // Reset timing
+              nextStartTimeRef.current = 0;
+
+              if (isModelSpeakingRef.current) {
+                isModelSpeakingRef.current = false;
+                callbacksRef.current?.onModelDoneSpeaking?.();
+              }
             }
           },
-          onclose: (e) => {
-            console.log("Gemini Live Session Closed", e);
-            disconnect();
-          },
+
+          onclose: (e) => { console.log('Session closed', e); disconnect(); },
           onerror: (e) => {
-            console.error("Gemini Live API Error", e);
-            setError("Connection error occurred.");
+            console.error('Live API error', e);
+            setError('Connection error occurred.');
             disconnect();
           },
         },
       });
 
-      sessionRef.current = sessionPromise;
     } catch (err: any) {
-      console.error("Connection failed:", err);
-      setError(err.message || "Failed to connect");
+      console.error('Connection failed:', err);
+      setError(err.message || 'Failed to connect');
       setIsConnecting(false);
       disconnect();
     }
   }, [disconnect, isConnecting, isConnected]);
 
-  return {
-    connect,
-    disconnect,
-    isConnected,
-    isConnecting,
-    error,
-    analyser,
-  };
+  return { connect, disconnect, isConnected, isConnecting, isDisconnecting, error, analyser };
 };

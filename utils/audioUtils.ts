@@ -1,5 +1,7 @@
 import { Blob } from '@google/genai';
 
+// ── Base64 helpers ────────────────────────────────────────────────────────────
+
 export function base64ToArrayBuffer(base64: string): ArrayBuffer {
   const binaryString = window.atob(base64);
   const len = binaryString.length;
@@ -10,45 +12,57 @@ export function base64ToArrayBuffer(base64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
+/**
+ * Converts an ArrayBuffer to a base64 string.
+ * Uses 8 192-byte chunks to avoid the O(n²) cost of single-char string
+ * concatenation, while staying within the JS call-stack limit for spread.
+ */
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  let binary = '';
   const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  let binary = '';
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
   }
   return window.btoa(binary);
 }
 
-export async function decodeAudioData(
+// ── Audio decode ──────────────────────────────────────────────────────────────
+
+/**
+ * Synchronous PCM Int16 → AudioBuffer conversion.
+ * Intentionally NOT async so the onmessage handler can schedule audio chunks
+ * in strict order without any await-interleaving race condition.
+ */
+export function decodeAudioDataSync(
   data: ArrayBuffer,
   ctx: AudioContext,
-  sampleRate: number = 24000,
-  numChannels: number = 1
-): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data);
+  sampleRate = 24000,
+  numChannels = 1,
+): AudioBuffer {
+  const dataInt16  = new Int16Array(data);
   const frameCount = dataInt16.length / numChannels;
-  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+  const buffer     = ctx.createBuffer(numChannels, frameCount, sampleRate);
 
-  for (let channel = 0; channel < numChannels; channel++) {
-    const channelData = buffer.getChannelData(channel);
+  for (let ch = 0; ch < numChannels; ch++) {
+    const channelData = buffer.getChannelData(ch);
     for (let i = 0; i < frameCount; i++) {
-      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+      channelData[i] = dataInt16[i * numChannels + ch] / 32768.0;
     }
   }
   return buffer;
 }
 
+// ── PCM capture ───────────────────────────────────────────────────────────────
+
 export function createPcmBlob(data: Float32Array): Blob {
-    const l = data.length;
-    const int16 = new Int16Array(l);
-    for (let i = 0; i < l; i++) {
-      // Clamp values to [-1, 1] range before scaling
-      const s = Math.max(-1, Math.min(1, data[i]));
-      int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-    }
-    return {
-      data: arrayBufferToBase64(int16.buffer),
-      mimeType: 'audio/pcm;rate=16000',
-    };
+  const int16 = new Int16Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    const s = Math.max(-1, Math.min(1, data[i]));
+    int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return {
+    data: arrayBufferToBase64(int16.buffer),
+    mimeType: 'audio/pcm;rate=16000',
+  };
 }
