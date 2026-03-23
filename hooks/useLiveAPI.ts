@@ -135,14 +135,29 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
         class VadCaptureProcessor extends AudioWorkletProcessor {
           constructor() {
             super();
-            this._threshold  = 0.012;  // RMS energy level above which we consider speech
-            this._prePad     = 15;     // frames to keep before speech onset (~120ms)
-            this._endPad     = 45;     // silent frames before committing utterance (~360ms)
-            this._minFrames  = 10;     // minimum speech frames — avoids noise blips (~80ms)
-            this._preBuffer  = [];     // rolling window of frames before speech
-            this._speech     = [];     // frames accumulated during speech
-            this._speaking   = false;
-            this._silFrames  = 0;
+
+            // ── Phase 1: Ambient noise calibration ───────────────────────────
+            // Spend the first ~1.5 s measuring the room's noise floor before
+            // attempting any speech detection.  The threshold is then set
+            // dynamically as 4× the measured ambient RMS, so the VAD adapts to
+            // quiet studio environments AND noisy classrooms equally well.
+            this._calibrating  = true;
+            this._calibTarget  = 200;   // ~200 blocks × 8 ms = 1.6 s
+            this._calibFrames  = 0;
+            this._calibSumSq   = 0;
+            this._threshold    = 0.018; // safe conservative fallback
+
+            // ── Phase 2: VAD parameters ───────────────────────────────────────
+            this._onsetFrames  = 3;     // consecutive hot frames needed to start (~24 ms)
+            this._onsetCount   = 0;
+            this._prePad       = 15;    // pre-speech buffer (~120 ms)
+            this._endPad       = 50;    // silence frames before commit (~400 ms)
+            this._minFrames    = 12;    // ~96ms minimum — short enough for "ok" / "hi"
+
+            this._preBuffer    = [];
+            this._speech       = [];
+            this._speaking     = false;
+            this._silFrames    = 0;
             this._speechFrames = 0;
           }
 
@@ -157,19 +172,48 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
             if (!ch) return true;
 
             const rms   = this._rms(ch);
-            const frame = ch.slice(); // copy — the engine reuses the underlying buffer
+            const frame = ch.slice();
 
+            // ── Calibration phase ─────────────────────────────────────────────
+            if (this._calibrating) {
+              this._calibSumSq += rms * rms;
+              this._calibFrames++;
+              // Keep pre-buffer rolling even during calibration
+              this._preBuffer.push(frame);
+              if (this._preBuffer.length > this._prePad) this._preBuffer.shift();
+
+              if (this._calibFrames >= this._calibTarget) {
+                this._calibrating = false;
+                const ambientRms  = Math.sqrt(this._calibSumSq / this._calibFrames);
+                // 4× noise floor, with a sensible minimum so very quiet rooms
+                // don't end up with a threshold below measurable noise.
+                this._threshold   = Math.max(0.018, ambientRms * 4.0);
+                this.port.postMessage({
+                  type: 'calibrated',
+                  threshold:  this._threshold,
+                  noiseFloor: ambientRms,
+                });
+              }
+              return true;
+            }
+
+            // ── VAD detection ─────────────────────────────────────────────────
             if (!this._speaking) {
-              // Maintain a rolling pre-speech buffer for prefix padding
               this._preBuffer.push(frame);
               if (this._preBuffer.length > this._prePad) this._preBuffer.shift();
 
               if (rms > this._threshold) {
-                this._speaking     = true;
-                this._silFrames    = 0;
-                this._speechFrames = 0;
-                // Include pre-buffer so we don't clip the first phoneme
-                this._speech = [...this._preBuffer, frame];
+                this._onsetCount++;
+                if (this._onsetCount >= this._onsetFrames) {
+                  // Confirmed onset — start buffering speech
+                  this._speaking     = true;
+                  this._silFrames    = 0;
+                  this._speechFrames = 0;
+                  this._speech       = [...this._preBuffer]; // include pre-pad
+                  this._onsetCount   = 0;
+                }
+              } else {
+                this._onsetCount = 0; // reset if any quiet frame interrupts onset
               }
             } else {
               this._speech.push(frame);
@@ -179,7 +223,6 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
                 this._silFrames++;
                 if (this._silFrames >= this._endPad) {
                   if (this._speechFrames >= this._minFrames) {
-                    // Flatten all frames into one Float32Array and transfer ownership
                     const total = this._speech.reduce((s, c) => s + c.length, 0);
                     const out   = new Float32Array(total);
                     let off = 0;
@@ -258,16 +301,49 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
             // text → Gemini sendClientContent (text turn).
             const GROQ_KEY = process.env.GROQ_API_KEY;
 
-            workletNode.port.onmessage = async (e: MessageEvent<Float32Array>) => {
+            workletNode.port.onmessage = async (e: MessageEvent) => {
+              // ── Calibration notification ──────────────────────────────────
+              if (e.data?.type === 'calibrated') {
+                console.debug(
+                  `[VAD] Calibrated — noise floor: ${e.data.noiseFloor.toFixed(4)}, ` +
+                  `threshold: ${e.data.threshold.toFixed(4)}`
+                );
+                return;
+              }
+
+              // ── Speech segment ─────────────────────────────────────────────
+              if (!(e.data instanceof Float32Array)) return;
+
               const session = sessionRef.current;
               if (!session || !GROQ_KEY) return;
 
               const samples = e.data;
 
-              // Show a pending bubble so the user knows their speech was captured
               callbacksRef.current?.onUserTranscript?.('…', false);
 
               try {
+                // ── Known Whisper hallucination blocklist ─────────────────────
+                // Whisper was trained on YouTube subtitles and memorises these
+                // phrases.  It outputs them verbatim when the audio is silence,
+                // background noise, music, or very low-energy speech.
+                // All entries are lowercased and punctuation-stripped for matching.
+                const HALLUCINATIONS = new Set([
+                  'thank you', 'thank you for watching', 'thanks for watching',
+                  'thank you for watching this video', 'thanks for watching this video',
+                  'thank you for listening', 'thanks for listening',
+                  'please subscribe', 'please like and subscribe',
+                  'like and subscribe', 'dont forget to subscribe',
+                  'see you next time', 'see you in the next video',
+                  'see you next week', 'ill see you in the next one',
+                  'this video was made possible by', 'sponsored by',
+                  'subtitles by', 'captions by', 'transcript by',
+                  'transcribed by', 'edited by', 'music by',
+                  'subscribe to my channel', 'hit the bell icon',
+                  'turn on notifications', 'click the notification bell',
+                  'you', 'the', 'i', 'uh', 'um', 'hmm', 'hm', 'ah',
+                  'foreign', 'music', 'applause', 'laughter', 'silence',
+                ]);
+
                 const wav      = float32ToWav(samples, 16000);
                 const formData = new FormData();
                 formData.append(
@@ -275,8 +351,17 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
                   new Blob([wav], { type: 'audio/wav' }),
                   'audio.wav',
                 );
-                formData.append('model', 'whisper-large-v3');
-                formData.append('response_format', 'json');
+                formData.append('model',           'whisper-large-v3');
+                // verbose_json exposes Whisper's internal confidence scores:
+                //   avg_log_prob  — average log-probability per token.
+                //                   Values near 0 = high confidence.
+                //                   Values < -0.6  = model is guessing → discard.
+                //   no_speech_prob — probability the audio contains no speech.
+                //                   Values > 0.5   = likely silence/noise → discard.
+                // These are the same signals OpenAI uses to suppress hallucinations
+                // in their own Whisper post-processing pipeline.
+                formData.append('response_format', 'verbose_json');
+                formData.append('temperature',     '0');
 
                 const res = await fetch(
                   'https://api.groq.com/openai/v1/audio/transcriptions',
@@ -288,26 +373,59 @@ export const useLiveAPI = (options?: UseLiveAPIOptions): UseLiveAPIResult => {
                 );
 
                 if (!res.ok) throw new Error(`Groq ${res.status}`);
-                const { text } = await res.json() as { text?: string };
-                const transcript = (text ?? '').trim();
 
-                if (!transcript) {
-                  // Noise / silence — remove the pending placeholder bubble
+                const data     = await res.json() as {
+                  text?: string;
+                  segments?: Array<{
+                    avg_log_prob?: number;
+                    no_speech_prob?: number;
+                    compression_ratio?: number;
+                  }>;
+                };
+                const transcript = (data.text ?? '').trim();
+                const segs       = data.segments ?? [];
+
+                // ── Layer A: Whisper confidence scores ────────────────────────
+                // Reject when the model itself signals low confidence.
+                if (segs.length > 0) {
+                  const avgLogProb  = segs.reduce((s, g) => s + (g.avg_log_prob  ?? 0), 0) / segs.length;
+                  const maxNoSpeech = Math.max(...segs.map(g => g.no_speech_prob ?? 0));
+
+                  if (avgLogProb < -0.6 || maxNoSpeech > 0.5) {
+                    callbacksRef.current?.onUserTranscript?.('\x00', true);
+                    return;
+                  }
+                }
+
+                // ── Layer B: text-level filters ───────────────────────────────
+                const norm = transcript.toLowerCase().replace(/[^a-z\u0900-\u09FF\s]/g, '').trim();
+                const isNoise =
+                  !transcript ||
+                  // Whisper bracketed/parenthesised no-speech markers
+                  /^\s*[\[\(].*[\]\)]\s*$/.test(transcript) ||
+                  // Fewer than 2 real alphabet letters
+                  transcript.replace(/[^a-zA-Z\u0900-\u09FF]/g, '').length < 2 ||
+                  // Direct match against known hallucination phrases
+                  HALLUCINATIONS.has(norm) ||
+                  // Multi-word repetition: "Thank you. Thank you. Thank you."
+                  (() => {
+                    const words = norm.split(/\s+/).filter(Boolean);
+                    return words.length >= 2 && words.length <= 8 && new Set(words).size === 1;
+                  })();
+
+                if (isNoise) {
                   callbacksRef.current?.onUserTranscript?.('\x00', true);
                   return;
                 }
 
-                // Replace the '…' bubble with the real transcript
                 callbacksRef.current?.onUserTranscript?.(transcript, true);
 
-                // Send the transcript text to Gemini as the user's turn
                 (session as any).sendClientContent({
                   turns: [{ role: 'user', parts: [{ text: transcript }] }],
                   turnComplete: true,
                 });
               } catch (err) {
                 console.error('Groq STT error:', err);
-                // Remove the pending placeholder on failure
                 callbacksRef.current?.onUserTranscript?.('\x00', true);
               }
             };
